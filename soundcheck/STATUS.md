@@ -1,7 +1,7 @@
 # Current state and resume point
 
 Snapshot: 2026-09-21, after the `stage 10: end-to-end and adversarial tests`
-commit. All ten stages of SPEC.md section 12 are implemented. Every commit on `master` passes `scripts/gate.sh` (fmt, check, clippy
+commit. All ten stages of SPEC.md section 12 are implemented. Every commit passes `scripts/gate.sh` (fmt, check, clippy
 `-D warnings`, test).
 
 ## Where we are
