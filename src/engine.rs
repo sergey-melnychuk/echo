@@ -5,12 +5,13 @@
 //! local change and a remote change to the same path never interleave.
 //!
 //! `state.json` remembers, per path, the hash of the bytes last written to or
-//! read from disk and the document heads those bytes correspond to. A local
-//! edit is applied to the document forked at those heads and merged back, so
-//! it combines with remote changes that arrived in between (CRD-1) instead of
-//! replacing them (NOTES.md, stage 2).
+//! read from disk, the document heads those bytes correspond to and, for
+//! blobs, the manifest. A local edit is applied to the document forked at
+//! those heads and merged back, so it combines with remote changes that
+//! arrived in between (CRD-1) instead of replacing them (NOTES.md, stage 2).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,8 +28,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
-use crate::config::{self, Layout};
-use crate::filedoc::{self, Content, FileDoc, MAX_TEXT_BYTES};
+use crate::chunker;
+use crate::config::{self, ConflictIndex, Layout, LoserInfo};
+use crate::filedoc::{self, Content, FileDoc, Version, VersionKind, Visible, MAX_TEXT_BYTES};
 use crate::paths;
 use crate::vault::Vault;
 use crate::watcher::Watcher;
@@ -44,7 +46,7 @@ pub enum Outcome {
     Nothing,
     /// The file on disk was written or removed to match the merged document.
     Materialized,
-    /// Skipped: read-only device, binary file before stage 3, or an invalid key.
+    /// Skipped: read-only device, or an invalid key.
     Skipped(String),
     /// The file on disk is not what this device last saw there: an
     /// unpublished local change that must be published first (CRD-1).
@@ -59,16 +61,20 @@ struct FileState {
     /// Heads of the document those bytes were materialized from or published as.
     #[serde(default)]
     heads: Vec<String>,
+    /// The manifest hash when the bytes are a blob version, hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
 }
 
 impl FileState {
-    fn new(hash: String, heads: &[ChangeHash]) -> FileState {
+    fn new(hash: String, heads: &[ChangeHash], manifest: Option<String>) -> FileState {
         FileState {
             hash,
             heads: heads
                 .iter()
                 .map(|h| data_encoding::HEXLOWER.encode(&h.0))
                 .collect(),
+            manifest,
         }
     }
 
@@ -107,18 +113,30 @@ impl State {
     }
 }
 
-fn hash_hex(bytes: &[u8]) -> String {
-    data_encoding::HEXLOWER.encode(blake3::hash(bytes).as_bytes())
+fn hex(bytes: &[u8]) -> String {
+    data_encoding::HEXLOWER.encode(bytes)
 }
 
-/// Classify file bytes: text if valid UTF-8, no NUL and at most 1 MiB.
-pub fn classify(bytes: Vec<u8>) -> Result<Content, Vec<u8>> {
+fn hash_hex(bytes: &[u8]) -> String {
+    hex(blake3::hash(bytes).as_bytes())
+}
+
+/// Text if valid UTF-8, no NUL and at most 1 MiB (SPEC.md section 4).
+pub fn classify_text(bytes: Vec<u8>) -> Option<String> {
     if bytes.len() > MAX_TEXT_BYTES || bytes.contains(&0) {
-        return Err(bytes);
+        return None;
     }
-    String::from_utf8(bytes)
-        .map(Content::Text)
-        .map_err(|err| err.into_bytes())
+    String::from_utf8(bytes).ok()
+}
+
+/// What is on disk for a key: the content hash and size, and the text if
+/// the file is text. Large files are hashed in a streaming pass and never
+/// held in memory.
+#[derive(Debug, Clone)]
+struct DiskFile {
+    hash: String,
+    size: u64,
+    text: Option<String>,
 }
 
 #[derive(Debug)]
@@ -129,8 +147,11 @@ pub struct Engine {
     root: PathBuf,
     actor: ActorId,
     state: Mutex<State>,
+    conflicts: Mutex<ConflictIndex>,
     /// Keys whose remote content is still downloading, by content hash.
     pending: Mutex<HashMap<Hash, HashSet<String>>>,
+    /// Keys whose blob download failed; retried when a peer shows up.
+    retry: Mutex<HashSet<String>>,
     /// Serializes every publish and apply.
     work: tokio::sync::Mutex<()>,
 }
@@ -143,19 +164,27 @@ impl Engine {
             .canonicalize()
             .with_context(|| format!("canonicalizing {}", layout.root().display()))?;
         let state = State::load(&layout.state())?;
+        let conflicts = config::load_conflicts(&layout.conflicts_index())?;
         Ok(Engine {
             actor: filedoc::actor_for(&vault.author()),
             vault,
             layout,
             root,
             state: Mutex::new(state),
+            conflicts: Mutex::new(conflicts),
             pending: Mutex::new(HashMap::new()),
+            retry: Mutex::new(HashSet::new()),
             work: tokio::sync::Mutex::new(()),
         })
     }
 
     pub fn vault(&self) -> &Vault {
         &self.vault
+    }
+
+    /// Paths currently flagged as conflicted.
+    pub fn conflicts(&self) -> ConflictIndex {
+        self.conflicts.lock().expect("conflicts").clone()
     }
 
     /// The folder name, for log lines.
@@ -249,8 +278,9 @@ impl Engine {
                 continue;
             };
             on_disk.insert(key.clone());
-            let bytes = std::fs::read(entry.path())?;
-            if self.known(&key).map(|k| k.hash) == Some(hash_hex(&bytes)) {
+            let known_hash = self.known(&key).map(|k| k.hash);
+            let disk_hash = self.read_disk(&key)?.map(|d| d.hash);
+            if known_hash.is_some() && known_hash == disk_hash {
                 continue;
             }
             if let Err(err) = self.publish_locked(&key).await {
@@ -351,23 +381,6 @@ impl Engine {
             return Ok(());
         }
         self.publish_path(&key).await?;
-        if !path.exists() {
-            // Possibly a directory that was removed or renamed away: every
-            // known file under it is gone.
-            let prefix = format!("{key}/");
-            let inside: Vec<String> = {
-                let state = self.state.lock().expect("state");
-                state
-                    .files
-                    .keys()
-                    .filter(|k| k.starts_with(&prefix))
-                    .cloned()
-                    .collect()
-            };
-            for key in inside {
-                self.publish_path(&key).await?;
-            }
-        }
         Ok(())
     }
 
@@ -417,10 +430,12 @@ impl Engine {
                 for key in keys {
                     self.apply_path(&key).await?;
                 }
+                self.retry_failed().await;
             }
             LiveEvent::NeighborUp(id) => {
                 tracing::info!("peer up {}", id.fmt_short());
                 self.vault.remember_peer(id).await?;
+                self.retry_failed().await;
             }
             LiveEvent::NeighborDown(id) => tracing::info!("peer down {}", id.fmt_short()),
             LiveEvent::SyncFinished(event) => tracing::debug!(
@@ -431,6 +446,16 @@ impl Engine {
             LiveEvent::InsertLocal { .. } => {}
         }
         Ok(())
+    }
+
+    /// Retry keys whose blob download failed earlier.
+    async fn retry_failed(&self) {
+        let keys: Vec<String> = self.retry.lock().expect("retry").drain().collect();
+        for key in keys {
+            if let Err(err) = self.apply_path(&key).await {
+                tracing::warn!("{key}: retry failed: {err:#}");
+            }
+        }
     }
 
     /// Publish the current on-disk content of `key` (SPEC.md 5.3, publishing),
@@ -446,17 +471,72 @@ impl Engine {
         self.apply_locked(key).await
     }
 
+    /// Export every losing version of `key` to `.vault/conflicts/`, fetching
+    /// chunks from peers when needed. Returns the copies' paths.
+    pub async fn export_conflicts(&self, key: &str) -> Result<Vec<PathBuf>> {
+        let _guard = self.work.lock().await;
+        paths::validate_key(key)?;
+        let Some(doc) = self.load_merged(key).await? else {
+            return Ok(Vec::new());
+        };
+        let visible = doc.visible()?;
+        let mut copies = Vec::new();
+        for loser in &visible.losers {
+            copies.push(self.export_loser(key, &doc, loser).await?);
+        }
+        Ok(copies)
+    }
+
     fn file_path(&self, key: &str) -> Result<PathBuf> {
         paths::path_for_key(&self.root, key)
     }
 
-    fn read_disk(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn tmp_path(&self, key: &str) -> PathBuf {
+        self.layout
+            .tmp()
+            .join(format!("{}.tmp", hash_hex(key.as_bytes())))
+    }
+
+    /// Read what is on disk for `key`. Files up to 1 MiB are read in full and
+    /// classified; larger files are hashed in a streaming pass.
+    fn read_disk(&self, key: &str) -> Result<Option<DiskFile>> {
         let path = self.file_path(key)?;
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
+        };
+        let metadata = file.metadata()?;
+        if metadata.is_dir() {
+            return Ok(None);
         }
+        if metadata.len() <= MAX_TEXT_BYTES as u64 {
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.read_to_end(&mut bytes)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let hash = hash_hex(&bytes);
+            let size = bytes.len() as u64;
+            let text = classify_text(bytes);
+            return Ok(Some(DiskFile { hash, size, text }));
+        }
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = vec![0u8; 1 << 20];
+        let mut size = 0u64;
+        loop {
+            let n = file
+                .read(&mut buffer)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            size += n as u64;
+        }
+        Ok(Some(DiskFile {
+            hash: hex(hasher.finalize().as_bytes()),
+            size,
+            text: None,
+        }))
     }
 
     fn known(&self, key: &str) -> Option<FileState> {
@@ -523,39 +603,79 @@ impl Engine {
             .map(|mut doc| doc.heads()))
     }
 
+    /// The content for a file on disk: text, or a blob imported into the
+    /// store. A blob whose bytes match what the state file recorded reuses
+    /// the recorded manifest instead of chunking again (echo suppression).
+    async fn content_for(&self, key: &str, disk: &DiskFile) -> Result<Content> {
+        if let Some(text) = &disk.text {
+            return Ok(Content::Text(text.clone()));
+        }
+        if let Some(known) = self.known(key) {
+            if known.hash == disk.hash {
+                if let Some(manifest) = known.manifest.as_deref().and_then(parse_hex32) {
+                    return Ok(Content::Blob {
+                        manifest,
+                        size: disk.size,
+                    });
+                }
+            }
+        }
+        let path = self.file_path(key)?;
+        let (manifest, size) = chunker::import_blob_file(self.vault.node().blobs(), &path)
+            .await
+            .with_context(|| format!("importing {key} as chunks"))?;
+        tracing::info!(
+            "{key}: imported {size} bytes as manifest {}",
+            manifest.fmt_short()
+        );
+        Ok(Content::Blob {
+            manifest: *manifest.as_bytes(),
+            size,
+        })
+    }
+
     async fn publish_locked(&self, key: &str) -> Result<Outcome> {
         paths::validate_key(key)?;
-        let disk = self.read_disk(key)?;
-        let disk_hash = disk.as_deref().map(hash_hex);
-        let content = match disk {
-            None => Content::Deleted,
-            Some(bytes) => match classify(bytes) {
-                Ok(content) => content,
-                Err(_) => {
-                    tracing::info!("{key}: binary files are synced from stage 3; skipping");
-                    return Ok(Outcome::Skipped("binary".into()));
-                }
-            },
-        };
         if !self.vault.can_write() {
             // SEC-6: a read-only device never publishes.
             return Ok(Outcome::Skipped("read-only".into()));
         }
+        let disk = self.read_disk(key)?;
+        let disk_hash = disk.as_ref().map(|d| d.hash.clone());
+        // An echo of this engine's own write (the bytes on disk are exactly
+        // what the state file recorded) is not a user write: it must not
+        // create a version, and in particular must not resolve a conflict.
+        let echo = disk_hash == self.known(key).map(|k| k.hash);
+        let content = match (&disk, echo) {
+            (_, true) => None,
+            (None, false) => Some(Content::Deleted),
+            (Some(disk), false) => Some(self.content_for(key, disk).await?),
+        };
         let mut doc = match self.load_merged(key).await? {
             Some(doc) => doc,
-            None if content == Content::Deleted => return Ok(Outcome::Nothing),
+            None if matches!(content, None | Some(Content::Deleted)) => {
+                return Ok(Outcome::Nothing)
+            }
             None => FileDoc::new(self.actor.clone()),
         };
-        let changed = self.ingest(key, &mut doc, &content)?;
+        let changed = match &content {
+            Some(content) => self.ingest(key, &mut doc, content)?,
+            None => false,
+        };
         if changed {
             let snapshot = doc.save();
             self.vault.set(key.as_bytes().to_vec(), snapshot).await?;
-            tracing::info!("{key}: published {}", describe(&content));
+            tracing::info!(
+                "{key}: published {}",
+                describe(content.as_ref().expect("changed implies content"))
+            );
         }
         // The merged document may differ from the file when remote changes
         // were folded in; bring the disk in line, unless the file changed
         // again meanwhile (the watcher reports that separately).
-        let outcome = self.materialize(key, &mut doc, disk_hash.as_deref())?;
+        let outcome = self
+            .materialize(key, &mut doc, disk_hash.as_deref())
+            .await?;
         Ok(match (changed, outcome) {
             (_, Outcome::LocalChange) => {
                 tracing::debug!("{key}: changed again while publishing");
@@ -610,7 +730,7 @@ impl Engine {
                 }
             }
             let expected = self.known(key).map(|k| k.hash);
-            match self.materialize(key, &mut doc, expected.as_deref())? {
+            match self.materialize(key, &mut doc, expected.as_deref()).await? {
                 // CRD-1, step 3: an unpublished local edit goes first, then
                 // the merge that includes it is materialized.
                 Outcome::LocalChange if self.vault.can_write() => {
@@ -619,8 +739,8 @@ impl Engine {
                 }
                 Outcome::LocalChange => {
                     tracing::warn!("{key}: local edit on a read-only device is overwritten");
-                    let now = self.read_disk(key)?.as_deref().map(hash_hex);
-                    return self.materialize(key, &mut doc, now.as_deref());
+                    let now = self.read_disk(key)?.map(|d| d.hash);
+                    return self.materialize(key, &mut doc, now.as_deref()).await;
                 }
                 outcome => return Ok(outcome),
             }
@@ -634,21 +754,21 @@ impl Engine {
     /// read); when the disk holds something else, nothing is written and
     /// [`Outcome::LocalChange`] is returned. Check and write use the same
     /// read of the disk, so a change in between cannot be overwritten unseen.
-    fn materialize(&self, key: &str, doc: &mut FileDoc, expected: Option<&str>) -> Result<Outcome> {
+    async fn materialize(
+        &self,
+        key: &str,
+        doc: &mut FileDoc,
+        expected: Option<&str>,
+    ) -> Result<Outcome> {
         let disk = self.read_disk(key)?;
-        let disk_hash = disk.as_deref().map(hash_hex);
+        let disk_hash = disk.as_ref().map(|d| d.hash.clone());
         if disk_hash.as_deref() != expected {
             return Ok(Outcome::LocalChange);
         }
         let visible = doc.visible()?;
-        if visible.is_conflict() {
-            tracing::warn!(
-                "{key}: {} concurrent version(s) lost; the earliest write is visible",
-                visible.losers.len()
-            );
-        }
+        self.record_conflict(key, &visible)?;
         let heads = doc.heads();
-        match &visible.content {
+        let outcome = match &visible.content {
             Content::Deleted => {
                 let existed = disk.is_some();
                 if existed {
@@ -658,31 +778,163 @@ impl Engine {
                     tracing::info!("{key}: removed");
                 }
                 self.set_known(key, None)?;
-                Ok(if existed {
+                if existed {
                     Outcome::Materialized
                 } else {
                     Outcome::Unchanged
-                })
+                }
             }
             Content::Text(text) => {
                 let bytes = text.as_bytes();
-                let same = disk.as_deref() == Some(bytes);
+                let same = disk.as_ref().and_then(|d| d.text.as_deref()) == Some(text.as_str());
                 if !same {
                     self.write_atomic(key, bytes)?;
                     tracing::info!("{key}: wrote {} bytes of text", bytes.len());
                 }
-                self.set_known(key, Some(FileState::new(hash_hex(bytes), &heads)))?;
-                Ok(if same {
+                self.set_known(key, Some(FileState::new(hash_hex(bytes), &heads, None)))?;
+                if same {
                     Outcome::Unchanged
                 } else {
                     Outcome::Materialized
-                })
+                }
             }
-            Content::Blob { .. } => {
-                tracing::info!("{key}: blob content is materialized from stage 3; skipping");
-                Ok(Outcome::Skipped("blob".into()))
+            Content::Blob { manifest, size } => {
+                let manifest_hex = hex(manifest);
+                let same = disk.is_some()
+                    && self.known(key).and_then(|k| k.manifest).as_deref()
+                        == Some(manifest_hex.as_str());
+                if same {
+                    let hash = disk_hash.expect("disk present");
+                    self.set_known(key, Some(FileState::new(hash, &heads, Some(manifest_hex))))?;
+                    Outcome::Unchanged
+                } else {
+                    let manifest = Hash::from_bytes(*manifest);
+                    let (hash, written) = match self.export_blob(key, manifest).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            self.retry.lock().expect("retry").insert(key.to_string());
+                            return Err(err);
+                        }
+                    };
+                    if written != *size {
+                        tracing::warn!(
+                            "{key}: manifest says {size} bytes but {written} were assembled"
+                        );
+                    }
+                    tracing::info!("{key}: wrote {written} bytes from {}", manifest.fmt_short());
+                    self.set_known(key, Some(FileState::new(hash, &heads, Some(manifest_hex))))?;
+                    Outcome::Materialized
+                }
+            }
+        };
+        // CRD-4: a local copy of every losing version this device wrote.
+        for loser in &visible.losers {
+            if loser.actor == self.actor.to_bytes() {
+                if let Err(err) = self.export_loser(key, doc, loser).await {
+                    tracing::warn!("{key}: exporting the losing version: {err:#}");
+                }
             }
         }
+        Ok(outcome)
+    }
+
+    /// Download (if needed) and assemble the blob `manifest` into the file
+    /// for `key`. Returns the hash and size of what was written.
+    async fn export_blob(&self, key: &str, manifest: Hash) -> Result<(String, u64)> {
+        let dest = self.file_path(key)?;
+        let peers = self.vault.peer_ids()?;
+        chunker::export_blob_file(
+            self.vault.node().blobs(),
+            self.vault.node().downloader(),
+            manifest,
+            &peers,
+            &self.tmp_path(key),
+            &dest,
+        )
+        .await
+        .with_context(|| format!("materializing blob {} for {key}", manifest.fmt_short()))
+    }
+
+    /// The copy of a losing version: `.vault/conflicts/<key>.<8 hex>`.
+    fn loser_copy_path(&self, key: &str, loser: &Version) -> PathBuf {
+        let mut path = self.layout.conflicts();
+        for component in key.split('/') {
+            path.push(component);
+        }
+        let name = format!(
+            "{}.{}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            loser_id(loser)
+        );
+        path.set_file_name(name);
+        path
+    }
+
+    /// Write one losing version to its copy path, fetching chunks if needed.
+    async fn export_loser(&self, key: &str, doc: &FileDoc, loser: &Version) -> Result<PathBuf> {
+        let dest = self.loser_copy_path(key, loser);
+        if dest.exists() {
+            return Ok(dest);
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = self.layout.tmp().join(format!(
+            "conflict-{}.tmp",
+            hash_hex(dest.to_string_lossy().as_bytes())
+        ));
+        match &loser.kind {
+            VersionKind::Blob { manifest, .. } => {
+                let peers = self.vault.peer_ids()?;
+                chunker::export_blob_file(
+                    self.vault.node().blobs(),
+                    self.vault.node().downloader(),
+                    Hash::from_bytes(*manifest),
+                    &peers,
+                    &tmp,
+                    &dest,
+                )
+                .await?;
+            }
+            VersionKind::Text { .. } => {
+                // The losing text edits live in the merged text object.
+                std::fs::write(&tmp, doc.text()?)?;
+                std::fs::rename(&tmp, &dest)?;
+            }
+            VersionKind::Deleted => bail!("a deletion is never a losing version"),
+        }
+        tracing::info!("{key}: losing version copied to {}", dest.display());
+        Ok(dest)
+    }
+
+    /// Keep `conflicts.json` in step with the merged document.
+    fn record_conflict(&self, key: &str, visible: &Visible) -> Result<()> {
+        let mut index = self.conflicts.lock().expect("conflicts");
+        let changed = if visible.is_conflict() {
+            let losers: Vec<LoserInfo> = visible
+                .losers
+                .iter()
+                .map(|loser| LoserInfo {
+                    kind: match loser.kind {
+                        VersionKind::Blob { .. } => "blob",
+                        VersionKind::Text { .. } => "text",
+                        VersionKind::Deleted => "deleted",
+                    }
+                    .to_string(),
+                    id: loser_id(loser),
+                    actor: hex(&loser.actor[..4]),
+                })
+                .collect();
+            index.insert(key.to_string(), losers.clone()) != Some(losers)
+        } else {
+            index.remove(key).is_some()
+        };
+        if changed {
+            config::save_conflicts(&self.layout.conflicts_index(), &index)?;
+        }
+        Ok(())
     }
 
     /// Write `bytes` to the file for `key` through `.vault/tmp/` and a rename.
@@ -692,15 +944,28 @@ impl Engine {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let tmp = self
-            .layout
-            .tmp()
-            .join(format!("{}.tmp", hash_hex(key.as_bytes())));
+        let tmp = self.tmp_path(key);
         std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("renaming into {}", path.display()))?;
         Ok(())
     }
+}
+
+/// The first 8 hex digits identifying a losing version.
+fn loser_id(loser: &Version) -> String {
+    match &loser.kind {
+        VersionKind::Blob { manifest, .. } => hex(&manifest[..4]),
+        VersionKind::Text { hash } => hex(&hash[..4]),
+        VersionKind::Deleted => "deleted".to_string(),
+    }
+}
+
+fn parse_hex32(text: &str) -> Option<[u8; 32]> {
+    let bytes = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(text.as_bytes())
+        .ok()?;
+    bytes.try_into().ok()
 }
 
 fn describe(content: &Content) -> String {

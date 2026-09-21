@@ -4,6 +4,7 @@
 //! to differ from it and why. The crate is a library so that the integration
 //! tests can drive the same code as the `vaultsync` binary.
 
+pub mod chunker;
 pub mod cli;
 pub mod config;
 pub mod engine;

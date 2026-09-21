@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
+use iroh_blobs::api::downloader::Downloader;
 use iroh_blobs::api::Store as BlobStore;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, ALPN as BLOBS_ALPN};
@@ -56,6 +57,7 @@ impl NetOptions {
 pub struct Node {
     endpoint: Endpoint,
     blobs: FsStore,
+    downloader: Downloader,
     docs: Docs,
     router: Router,
     /// Held until [`Node::shutdown`]; see [`Node::lock`].
@@ -85,6 +87,7 @@ impl Node {
         let blobs = FsStore::load(layout.blobs())
             .await
             .with_context(|| format!("opening blob store {}", layout.blobs().display()))?;
+        let downloader = blobs.downloader(&endpoint);
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let docs = Docs::persistent(layout.docs())
             .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
@@ -98,6 +101,7 @@ impl Node {
         Ok(Node {
             endpoint,
             blobs,
+            downloader,
             docs,
             router,
             lock_file: lock,
@@ -134,6 +138,11 @@ impl Node {
 
     pub fn blobs(&self) -> &BlobStore {
         &self.blobs
+    }
+
+    /// Multi-provider downloader over this endpoint.
+    pub fn downloader(&self) -> &Downloader {
+        &self.downloader
     }
 
     pub fn docs(&self) -> &Docs {

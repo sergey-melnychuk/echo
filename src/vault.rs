@@ -164,6 +164,11 @@ impl Vault {
         config::load_peers(&self.layout.peers())
     }
 
+    /// Known peer ids, the providers for blob downloads.
+    pub fn peer_ids(&self) -> Result<Vec<EndpointId>> {
+        Ok(self.peers()?.into_iter().map(|p| p.id).collect())
+    }
+
     /// Remember a peer's address for the next start.
     pub fn remember_peer_addr(&self, addr: EndpointAddr) -> Result<bool> {
         if addr.id == self.node.id() {

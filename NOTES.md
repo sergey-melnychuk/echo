@@ -422,3 +422,59 @@ real modules are written from the API notes above, not by moving spike code.
   pending map whenever it skips a snapshot (re-checking availability after
   registering, to close the gap), and `PendingContentReady` applies every
   pending key as a safety net.
+
+## Stage 3: blob files
+
+- **Echo suppression is hash based, and identical content never resolves a
+  conflict (CRD-5 narrowed).** After the engine materializes a file, the
+  watcher reports the write back. With the register in conflict,
+  `apply_local` treats any write as a resolving write, so the echo of the
+  winner's own materialization on the winner's author resolved the conflict
+  in its favor a moment after it appeared, and the flag and the loser's copy
+  never became visible on the other peers. `publish_locked` now skips
+  ingestion entirely when the bytes on disk hash to what `state.json`
+  recorded: that is the engine's own write coming back. The consequence is
+  that a user re-saving a conflicted file with byte-identical content does
+  not resolve the conflict; a content change (or a future explicit resolve
+  command) does. SPEC.md CRD-5 says "the next write"; here it means the next
+  write that changes the bytes.
+- `chunker.rs`: `import_blob_file` runs `StreamCDC` on a blocking thread and
+  hands chunks (at most 256 KiB each) over a channel of depth 4 to the async
+  side, which adds them with temporary tags; the `HashSeq` manifest gets a
+  persistent tag `manifest/<hex>` and protects its children. Memory stays
+  bounded by a few chunks regardless of file size. `export_blob_file` is the
+  two-step fetch from stage 0 (manifest as a raw blob, then the missing
+  children through the `Downloader` with every known peer as provider) and
+  streams the chunks into a temporary file that is renamed into place.
+- Text detection reads files up to 1 MiB in full; larger files are hashed in
+  a streaming pass and are blobs regardless of content (a 1.2 MiB UTF-8 file
+  is a blob, as SPEC.md section 4 says). The blob import is a second pass
+  over the file; if the file changes between the two passes the next watcher
+  event republishes it.
+- `state.json` entries carry the manifest of a materialized or published blob
+  version. A blob whose disk hash and manifest are both recorded is
+  recognized without chunking again; a remote blob version whose manifest
+  equals the recorded one is not re-exported.
+- Conflicts: `conflicts.json` under `.vault/` lists every path whose merged
+  document has losing versions (kind, 8 hex digits of the manifest or text
+  hash, 8 hex digits of the actor); the engine updates it on every
+  materialize, and `status` and `conflict list` read it without opening the
+  stores. The loser's author gets `.vault/conflicts/<key>.<8 hex>` written
+  automatically (CRD-4); other peers run `vaultsync conflict export <dir>
+  <path>`, which needs the stores and therefore a stopped node, or the
+  library's `Engine::export_conflicts`, which fetches the loser's chunks from
+  peers. A losing text version is exported as the merged text, because the
+  losing edits live inside the shared text object.
+- A blob whose chunks cannot be fetched (no peer known, or the only provider
+  offline) fails the apply with a logged error and is retried on the next
+  `NeighborUp` or `PendingContentReady`.
+- Gate tests in `tests/blobsync.rs` (3 tests, about 16 s in a debug build):
+  a 10 MiB random file present before start transfers byte-identical (over
+  40 chunk-sized blobs), a one-byte edit brings at most 3 new chunk-sized
+  blobs (measured through the receiving blob store's inventory), and B's
+  edit flows back; a partitioned concurrent binary edit ends with the same
+  winner on both peers (a tie on the Lamport counter, decided by actor id),
+  the loser's author holding a copy, `conflicts.json` flagging the path on
+  both, on-demand export on the other peer fetching the loser's chunks, and a
+  new write clearing the flag everywhere; a text file becoming binary and
+  back, an over-1 MiB text file as a blob, and blob deletions.

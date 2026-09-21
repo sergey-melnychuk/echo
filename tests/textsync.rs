@@ -3,152 +3,20 @@
 //! made before a remote apply is never overwritten (CRD-1); hostile keys are
 //! ignored (CRD-7, SEC-4). Loopback only, no fixed sleeps.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+mod common;
+
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use common::{
+    merged_content, wait_for_bytes, wait_for_file, wait_for_merged, write_file, Peer, DEADLINE,
+};
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
-use iroh_docs::DocTicket;
 use vaultsync::config::{Config, Layout};
-use vaultsync::engine::{Engine, Outcome, Running};
+use vaultsync::engine::Outcome;
 use vaultsync::filedoc::{actor_for, Content, FileDoc};
-use vaultsync::node::NetOptions;
-use vaultsync::vault::Vault;
-
-const DEADLINE: Duration = Duration::from_secs(30);
-const DEBOUNCE: Duration = Duration::from_millis(100);
-
-struct Peer {
-    dir: PathBuf,
-    vault: Arc<Vault>,
-    engine: Arc<Engine>,
-    running: Option<Running>,
-}
-
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .with_test_writer()
-        .try_init();
-}
-
-impl Peer {
-    async fn init(dir: &Path) -> Result<Peer> {
-        init_tracing();
-        let vault = Vault::init(dir, &NetOptions::loopback()).await?;
-        Self::start(dir, vault).await
-    }
-
-    async fn join(dir: &Path, ticket: &DocTicket) -> Result<Peer> {
-        let vault = Vault::join(dir, ticket.clone(), &NetOptions::loopback()).await?;
-        Self::start(dir, vault).await
-    }
-
-    async fn open(dir: &Path) -> Result<Peer> {
-        let vault = Vault::open(dir, &NetOptions::loopback()).await?;
-        Self::start(dir, vault).await
-    }
-
-    async fn start(dir: &Path, vault: Vault) -> Result<Peer> {
-        vault.start_sync().await?;
-        let vault = Arc::new(vault);
-        let engine = Arc::new(Engine::new(vault.clone())?);
-        let running = engine.clone().start(DEBOUNCE).await?;
-        Ok(Peer {
-            dir: dir.to_path_buf(),
-            vault,
-            engine,
-            running: Some(running),
-        })
-    }
-
-    async fn stop_engine(&mut self) -> Result<()> {
-        if let Some(running) = self.running.take() {
-            running.stop().await?;
-        }
-        Ok(())
-    }
-
-    async fn stop(mut self) -> Result<()> {
-        self.stop_engine().await?;
-        self.vault.shutdown().await
-    }
-
-    fn path(&self, key: &str) -> PathBuf {
-        self.dir.join(key)
-    }
-
-    fn write(&self, key: &str, text: &str) -> Result<()> {
-        write_file(&self.path(key), text.as_bytes())
-    }
-
-    fn read(&self, key: &str) -> Option<String> {
-        std::fs::read_to_string(self.path(key)).ok()
-    }
-}
-
-fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, bytes)?;
-    Ok(())
-}
-
-async fn wait_for_file(peer: &Peer, key: &str, expected: Option<&str>) -> Result<()> {
-    let deadline = Instant::now() + DEADLINE;
-    loop {
-        if peer.read(key).as_deref() == expected {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            bail!(
-                "timeout waiting for {key} = {expected:?} on {}, found {:?}",
-                peer.dir.display(),
-                peer.read(key)
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-/// The visible content of the merged document on this peer, if every
-/// snapshot is available locally.
-async fn merged_content(peer: &Peer, key: &str) -> Result<Option<Content>> {
-    let actor = actor_for(&peer.vault.author());
-    let mut doc: Option<FileDoc> = None;
-    for entry in peer.vault.entries(Query::all().key_exact(key)).await? {
-        if !peer.vault.has_content(entry.content_hash()).await? {
-            return Ok(None);
-        }
-        let bytes = peer.vault.content(entry.content_hash()).await?;
-        match &mut doc {
-            None => doc = Some(FileDoc::load(&bytes, actor.clone())?),
-            Some(doc) => doc.merge_bytes(&bytes)?,
-        }
-    }
-    Ok(match doc {
-        Some(doc) => Some(doc.visible()?.content),
-        None => None,
-    })
-}
-
-async fn wait_for_merged(peer: &Peer, key: &str, expected: &Content) -> Result<()> {
-    let deadline = Instant::now() + DEADLINE;
-    loop {
-        if merged_content(peer, key).await?.as_ref() == Some(expected) {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            bail!("timeout waiting for the merged document of {key}");
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
 
 #[tokio::test]
 async fn text_files_sync_both_ways_including_delete() -> Result<()> {
@@ -180,11 +48,12 @@ async fn text_files_sync_both_ways_including_delete() -> Result<()> {
     b.write("notes/a.txt", "third life\n")?;
     wait_for_file(&a, "notes/a.txt", Some("third life\n")).await?;
 
-    // Binary content is not synced before stage 3, and does not disturb the rest.
-    write_file(&a.path("img.bin"), &[0u8, 1, 2, 255, 0, 7])?;
+    // Binary content syncs too (stage 3), next to the text files.
+    let binary = [0u8, 1, 2, 255, 0, 7];
+    write_file(&a.path("img.bin"), &binary)?;
     a.write("after.txt", "after the binary\n")?;
     wait_for_file(&b, "after.txt", Some("after the binary\n")).await?;
-    assert!(!b.path("img.bin").exists());
+    wait_for_bytes(&b, "img.bin", Some(&binary)).await?;
 
     // Removing a directory removes every file inside it.
     a.write("dir/one.txt", "1\n")?;

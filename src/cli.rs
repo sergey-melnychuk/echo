@@ -59,8 +59,23 @@ pub enum Command {
     Join { dir: PathBuf, invite: String },
     /// Start the node and sync until Ctrl-C.
     Run { dir: PathBuf },
-    /// Show the vault id, this device's id, known peers and entry count.
+    /// Show the vault id, this device's id, known peers, conflicts and entry count.
     Status { dir: PathBuf },
+    /// List conflicted paths, or export the losing versions of one path to
+    /// `.vault/conflicts/` (the node must not be running).
+    Conflict {
+        dir: PathBuf,
+        #[command(subcommand)]
+        action: ConflictAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConflictAction {
+    /// List every path with losing versions.
+    List,
+    /// Export the losing versions of PATH to `.vault/conflicts/`.
+    Export { path: String },
 }
 
 impl Cli {
@@ -123,6 +138,47 @@ pub async fn execute(cli: Cli) -> Result<()> {
             run_until_ctrl_c(vault).await
         }
         Command::Status { dir } => status(&dir).await,
+        Command::Conflict { dir, action } => conflict(&dir, action, &net).await,
+    }
+}
+
+async fn conflict(dir: &Path, action: ConflictAction, net: &NetOptions) -> Result<()> {
+    let layout = Layout::new(dir);
+    if !layout.is_initialized() {
+        bail!("{} is not a vault", dir.display());
+    }
+    match action {
+        ConflictAction::List => {
+            let index = config::load_conflicts(&layout.conflicts_index())?;
+            print_conflicts(&index);
+            Ok(())
+        }
+        ConflictAction::Export { path } => {
+            let vault = Arc::new(Vault::open(dir, net).await?);
+            let engine = Engine::new(vault.clone())?;
+            let result = engine.export_conflicts(&path).await;
+            vault.shutdown().await?;
+            let copies = result?;
+            if copies.is_empty() {
+                println!("{path}: no losing versions");
+            }
+            for copy in copies {
+                println!("{}", copy.display());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_conflicts(index: &config::ConflictIndex) {
+    println!("conflicts: {}", index.len());
+    for (key, losers) in index {
+        for loser in losers {
+            println!(
+                "  {key}: losing {} version {} by {}",
+                loser.kind, loser.id, loser.actor
+            );
+        }
     }
 }
 
@@ -196,6 +252,7 @@ async fn status(dir: &Path) -> Result<()> {
     for peer in &peers {
         println!("  {} {:?}", peer.id.fmt_short(), peer.addrs);
     }
+    print_conflicts(&config::load_conflicts(&layout.conflicts_index())?);
     // The stores are exclusive; while `run` is active this fails.
     match Vault::open(dir, &NetOptions::loopback()).await {
         Ok(vault) => {

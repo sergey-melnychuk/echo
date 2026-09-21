@@ -4,6 +4,7 @@
 //! Key files and the config are written with mode 0600 (SEC-5) through a
 //! temporary file and a rename, so a crash never leaves a half-written file.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -81,8 +82,14 @@ impl Layout {
         self.dot().join("state.json")
     }
 
+    /// Local copies of losing versions (CRD-4).
     pub fn conflicts(&self) -> PathBuf {
         self.dot().join("conflicts")
+    }
+
+    /// Paths currently flagged as conflicted, for `status`.
+    pub fn conflicts_index(&self) -> PathBuf {
+        self.dot().join("conflicts.json")
     }
 
     pub fn tmp(&self) -> PathBuf {
@@ -206,6 +213,32 @@ pub fn merge_peer(peers: &mut Vec<EndpointAddr>, addr: EndpointAddr) -> bool {
             true
         }
     }
+}
+
+/// One losing version of a conflicted path (CRD-4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoserInfo {
+    /// `blob` or `text`.
+    pub kind: String,
+    /// The first 8 hex digits of the manifest hash (blob) or text hash.
+    pub id: String,
+    /// The first 8 hex digits of the author's actor id.
+    pub actor: String,
+}
+
+/// `conflicts.json`: every path whose merged document has losing versions.
+pub type ConflictIndex = BTreeMap<String, Vec<LoserInfo>>;
+
+pub fn load_conflicts(path: &Path) -> Result<ConflictIndex> {
+    if !path.is_file() {
+        return Ok(ConflictIndex::new());
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+pub fn save_conflicts(path: &Path, index: &ConflictIndex) -> Result<()> {
+    write_private(path, serde_json::to_string_pretty(index)?.as_bytes())
 }
 
 pub fn save_own_addr(path: &Path, addr: &EndpointAddr) -> Result<()> {

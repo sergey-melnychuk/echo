@@ -5,7 +5,7 @@
 use anyhow::Result;
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::Capability;
-use vaultsync::cli::{execute, make_invite, Cli, Command};
+use vaultsync::cli::{execute, make_invite, Cli, Command, ConflictAction};
 use vaultsync::config::{self, Layout};
 use vaultsync::node::NetOptions;
 use vaultsync::vault::Vault;
@@ -72,6 +72,19 @@ async fn init_whoami_invite_status() -> Result<()> {
     .await
     .is_err());
     execute(cli(Command::Status { dir: dir.clone() })).await?;
+    execute(cli(Command::Conflict {
+        dir: dir.clone(),
+        action: ConflictAction::List,
+    }))
+    .await?;
+    // Exporting a path without losing versions is fine and prints nothing.
+    execute(cli(Command::Conflict {
+        dir: dir.clone(),
+        action: ConflictAction::Export {
+            path: "nothing.txt".into(),
+        },
+    }))
+    .await?;
     assert!(execute(cli(Command::Status { dir: fresh })).await.is_err());
     assert!(execute(cli(Command::Init { dir })).await.is_err());
     Ok(())
