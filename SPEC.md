@@ -2,6 +2,11 @@
 
 Date: 2026-09-21. Crate versions were checked against docs.rs on that date.
 
+> This document is the second design and the one this repository implements.
+> Where it says "SPEC.md" it refers to an earlier design that built the wire
+> protocol, storage, signaling and fetching by hand; that document is not part
+> of this repository, and section 11 summarizes how the two differ.
+
 ## 0. Summary
 
 SPEC.md built the wire protocol, storage, gossip signaling, chunk fetching and version tracking by hand. SPEC2 reuses the iroh 1.x stack for all of that. The custom code shrinks to five small pieces:

@@ -1,1 +1,3 @@
 target/
+# A vault created inside the repository by accident.
+.vault/

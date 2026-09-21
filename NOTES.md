@@ -628,8 +628,7 @@ Two processes on one macOS machine with the default `N0` preset (no
 
 - Both endpoints chose `https://euc1-1.relay.n0.iroh.link./` as their home
   relay within a few seconds of binding; `run` printed only the LAN address
-  (`10.10.230.119:<port>`) because `endpoint.addr()` is recorded before the
-  home relay is known.
+  because `endpoint.addr()` is recorded before the home relay is known.
 - The invite was issued before `run`, so it carried the owner's endpoint id
   and no address. The joining process resolved the owner through discovery
   and had the first file within 1 s of starting; the reply went back in 2 s.

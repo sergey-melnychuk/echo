@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 # Maximum rust-version among the dependencies (iroh, iroh-blobs, iroh-docs).
 rust-version = "1.91"
+description = "Proof of concept: serverless folder sync on iroh, iroh-docs, iroh-blobs and Automerge, with Biscuit-token admission"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["p2p", "sync", "iroh", "automerge", "crdt"]
+categories = ["filesystem", "network-programming"]
+# A proof of concept, not a crates.io release.
+publish = false
 
 [dependencies]
 iroh = "1.2"
