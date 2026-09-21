@@ -285,3 +285,59 @@ The spike programs are kept under `examples/` for reference and reruns
 (use `--release`), and `spike_net [a|b|c]` for docs sync, delta transfer and
 the auth hook). They are throwaway by design: no tests depend on them, and the
 real modules are written from the API notes above, not by moving spike code.
+
+## Stage 1: vault plumbing
+
+- Module layout: `config.rs` (the `.vault/` layout, `config.json`, key files,
+  `peers.json`), `node.rs` (endpoint plus blobs, gossip and docs on a router),
+  `vault.rs` (one replica, one author, one node) and `cli.rs`. The crate is a
+  library plus a thin `main.rs`, so `tests/` drive the same code as the binary.
+- `.vault/` holds `config.json` (vault id, write flag), `endpoint.key` (hex
+  iroh secret key, 0600), `vault.key` (the docs capability as
+  `<kind byte><32 bytes>` in hex, 0600), `peers.json` (known `EndpointAddr`s),
+  `addr.json` (this node's addresses, written by `run`), `blobs/`, `docs/`,
+  `conflicts/`, `tmp/` and later `state.json`. All private files go through a
+  temporary file and a rename.
+- The namespace secret is stored in `vault.key` as well as inside
+  `docs.redb`, because `invite` must work while `run` holds the redb files
+  (redb takes an exclusive lock). `invite` therefore never opens the stores:
+  it builds the `DocTicket` from `vault.key`, `endpoint.key`, `addr.json` and
+  `--addr`. The only way to get the secret out of docs at `init` is
+  `doc.share(ShareMode::Write, AddrInfoOptions::Id).capability`.
+- `status` reports what it can from the files, then tries to open the stores
+  for the entry count and says so when they are locked by a running node.
+- `join` imports the capability with `import_namespace` (no sync) and stores
+  the ticket's peers; syncing starts with `start_sync(peers)` in `run`, which
+  `join` continues into, as the spec's command table says. On every
+  `NeighborUp` the running node records the peer's current addresses
+  (`endpoint.remote_info`) in `peers.json`, so the next start can call
+  `start_sync` with real addresses; the ticket's peers seed the list.
+- Every device uses the docs default author (`author_default`), which docs
+  persists in `docs/default-author`.
+- Network selection: `--loopback` (tests, demos: `presets::Minimal`, relays
+  disabled, bound to `127.0.0.1:0`) versus the default `presets::N0`;
+  `--bind <ip:port>` pins the UDP port so `--addr`-free invites stay valid
+  across restarts.
+- Read-only members: `Vault::set` refuses to publish and `invite --write`
+  refuses on a read capability (SEC-6 groundwork; enforcement by the docs
+  ticket itself is inherited).
+- Gate tests (`tests/plumbing.rs`, 5 tests, about 1 s): both-way sync of
+  entries including a 300 KiB value, late joiner catching up with two peers'
+  entries and writing back, restart with entries and content intact and sync
+  resuming from `peers.json`, read ticket holder cannot publish, and
+  `init`/`open` refusing the wrong state. `tests/cli.rs` covers `init`,
+  `whoami`, `invite` and `status`.
+- `.vault/lock` is an advisory file lock (`std::fs::File::try_lock`, stable
+  since Rust 1.89) taken by every process that opens the stores and held for
+  the node's lifetime. Without it a second opener (`status` while `run` was
+  active) blocked inside the redb open instead of failing, and the smoke test
+  hung. With it, `status`, a second `run` or `Vault::open` fail immediately
+  with "is in use by another process".
+- With `RUST_LOG=info`, iroh-docs logs `sync failed ... Failed to close
+  connection ... closed stream` once when two peers start syncing at the same
+  moment: each side opens a sync connection to the other, one direction wins
+  and the loser's connection is closed. The accept direction reports
+  `sync finished` in the same millisecond and entries flow. Benign; left as is.
+- Smoke test of the binary over loopback (`init`, `whoami`, `run --bind`,
+  `invite` while `run` is active, `join`, `status`, Ctrl-C on both): both
+  nodes see each other as neighbors and exit within a second of SIGINT.
