@@ -6,6 +6,7 @@ edition = "2021"
 rust-version = "1.91"
 description = "Proof of concept: serverless folder sync on iroh, iroh-docs, iroh-blobs and Automerge, with Biscuit-token admission"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/sergey-melnychuk/echo"
 readme = "README.md"
 keywords = ["p2p", "sync", "iroh", "automerge", "crdt"]
 categories = ["filesystem", "network-programming"]

@@ -1,5 +1,7 @@
 # echo
 
+[![gate](https://github.com/sergey-melnychuk/echo/actions/workflows/gate.yml/badge.svg)](https://github.com/sergey-melnychuk/echo/actions/workflows/gate.yml)
+
 A proof of concept that keeps a folder in sync between devices with no
 central server (the executable is `echosync`), built on [iroh](https://iroh.computer) 1.x, iroh-docs,
 iroh-blobs and Automerge.
@@ -17,6 +19,8 @@ had to differ from it and why, with measured numbers.
 ## Build and test
 
 ```sh
+git clone https://github.com/sergey-melnychuk/echo
+cd echo
 ./scripts/gate.sh          # fmt --check, check, clippy -D warnings, test
 cargo test --test e2e      # the three-node scenarios only
 ```
