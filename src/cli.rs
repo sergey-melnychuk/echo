@@ -3,18 +3,19 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use iroh::EndpointAddr;
+use iroh::{EndpointAddr, EndpointId};
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
-use iroh_docs::DocTicket;
 
 use crate::config::{self, Config, Layout};
 use crate::engine::Engine;
+use crate::invite::{self, Invite};
 use crate::node::NetOptions;
-use crate::vault::{restrict_capability, Vault};
+use crate::vault::{self, Vault};
 use crate::watcher::DEFAULT_DEBOUNCE;
 
 #[derive(Parser, Debug)]
@@ -41,7 +42,8 @@ pub enum Command {
     Init { dir: PathBuf },
     /// Print this device's endpoint id (creates the key on first use).
     Whoami { dir: PathBuf },
-    /// Print an invite for a new device.
+    /// Print an invite for a new device: a docs ticket, a Biscuit token and
+    /// the root public key. Treat it like a password.
     Invite {
         dir: PathBuf,
         /// Invite with write access (requires a write capability here).
@@ -50,6 +52,14 @@ pub enum Command {
         /// Invite with read-only access.
         #[arg(long)]
         read: bool,
+        /// Endpoint id of the invited device (its `whoami`). Without it the
+        /// invite is a bearer token that admits whoever holds it until it
+        /// expires, and that the holder may delegate further.
+        #[arg(long)]
+        audience: Option<String>,
+        /// Time to live of the token: seconds, or with a suffix s, m, h, d, w.
+        #[arg(long, default_value = "7d")]
+        ttl: String,
         /// Extra direct addresses of this node to include, for peers that
         /// cannot use address lookup (LAN, loopback).
         #[arg(long)]
@@ -111,6 +121,8 @@ pub async fn execute(cli: Cli) -> Result<()> {
             dir,
             write,
             read,
+            audience,
+            ttl,
             addr,
         } => {
             if !write && !read {
@@ -121,16 +133,26 @@ pub async fn execute(cli: Cli) -> Result<()> {
             } else {
                 ShareMode::Read
             };
-            let ticket = make_invite(&Layout::new(&dir), mode, &addr)?;
-            println!("{ticket}");
+            let audience =
+                match audience {
+                    Some(text) => Some(text.trim().parse::<EndpointId>().map_err(|err| {
+                        anyhow::anyhow!("--audience is not an endpoint id: {err}")
+                    })?),
+                    None => None,
+                };
+            let ttl = invite::parse_duration(&ttl)?;
+            let invite = make_invite(&Layout::new(&dir), mode, audience, ttl, &addr)?;
+            if invite.delegatable {
+                eprintln!(
+                    "note: without --audience this invite admits whoever holds it until it expires"
+                );
+            }
+            println!("{invite}");
             Ok(())
         }
         Command::Join { dir, invite } => {
-            let ticket: DocTicket = invite
-                .trim()
-                .parse()
-                .context("the invite is not a valid docs ticket")?;
-            let vault = Vault::join(&dir, ticket, &net).await?;
+            let invite: Invite = invite.parse().context("parsing the invite")?;
+            let vault = Vault::join(&dir, &invite, &net).await?;
             run_until_ctrl_c(vault).await
         }
         Command::Run { dir } => {
@@ -183,13 +205,19 @@ fn print_conflicts(index: &config::ConflictIndex) {
 }
 
 /// Build an invite from the files under `.vault/` without opening the stores,
-/// so it works while `run` holds them.
-pub fn make_invite(layout: &Layout, mode: ShareMode, extra: &[SocketAddr]) -> Result<DocTicket> {
+/// so it works while `run` holds them. The node's address comes from the
+/// file `run` writes, plus `extra`.
+pub fn make_invite(
+    layout: &Layout,
+    mode: ShareMode,
+    audience: Option<EndpointId>,
+    ttl: Duration,
+    extra: &[SocketAddr],
+) -> Result<Invite> {
     if !layout.is_initialized() {
         bail!("{} is not a vault", layout.root().display());
     }
-    let capability = config::load_capability(&layout.vault_key())?;
-    let capability = restrict_capability(capability, mode)?;
+    let config = Config::load(&layout.config())?;
     let key = config::load_secret_key(&layout.endpoint_key())?;
     let mut addr = config::load_own_addr(&layout.own_addr())?
         .filter(|a| a.id == key.public())
@@ -197,7 +225,7 @@ pub fn make_invite(layout: &Layout, mode: ShareMode, extra: &[SocketAddr]) -> Re
     for a in extra {
         addr = addr.with_ip_addr(*a);
     }
-    Ok(DocTicket::new(capability, vec![addr]))
+    vault::make_invite(layout, &config, addr, mode, audience, ttl)
 }
 
 async fn run_until_ctrl_c(vault: Vault) -> Result<()> {

@@ -12,7 +12,6 @@ use anyhow::{bail, Result};
 use common::{
     merged_content, wait_for_bytes, wait_for_file, wait_for_merged, write_file, Peer, DEADLINE,
 };
-use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
 use vaultsync::config::{Config, Layout};
 use vaultsync::engine::Outcome;
@@ -25,8 +24,8 @@ async fn text_files_sync_both_ways_including_delete() -> Result<()> {
     // A file that exists before the engine starts is picked up by the scan.
     write_file(&a_dir.join("pre.txt"), b"before start\n")?;
     let a = Peer::init(&a_dir).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
-    let b = Peer::join(&tmp.path().join("b"), &ticket).await?;
+    let invite = a.write_invite()?;
+    let b = Peer::join(&tmp.path().join("b"), &invite).await?;
     wait_for_file(&b, "pre.txt", Some("before start\n")).await?;
 
     a.write("notes/a.txt", "hello from a\n")?;
@@ -86,9 +85,9 @@ async fn text_files_sync_both_ways_including_delete() -> Result<()> {
 async fn offline_catch_up_and_partitioned_concurrent_edit() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let a = Peer::init(&tmp.path().join("a")).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
+    let invite = a.write_invite()?;
     let b_dir = tmp.path().join("b");
-    let b = Peer::join(&b_dir, &ticket).await?;
+    let b = Peer::join(&b_dir, &invite).await?;
     a.write("f.txt", "line1\nline2\nline3\n")?;
     wait_for_file(&b, "f.txt", Some("line1\nline2\nline3\n")).await?;
     a.write("only-while-offline.txt", "x\n")?;
@@ -118,8 +117,8 @@ async fn offline_catch_up_and_partitioned_concurrent_edit() -> Result<()> {
 async fn local_edit_before_remote_apply_is_not_overwritten() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let a = Peer::init(&tmp.path().join("a")).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
-    let mut b = Peer::join(&tmp.path().join("b"), &ticket).await?;
+    let invite = a.write_invite()?;
+    let mut b = Peer::join(&tmp.path().join("b"), &invite).await?;
     a.write("f.txt", "one\ntwo\nthree\n")?;
     wait_for_file(&b, "f.txt", Some("one\ntwo\nthree\n")).await?;
 
@@ -163,8 +162,8 @@ async fn local_edit_before_remote_apply_is_not_overwritten() -> Result<()> {
 async fn hostile_keys_are_ignored() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let a = Peer::init(&tmp.path().join("a")).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
-    let b = Peer::join(&tmp.path().join("b"), &ticket).await?;
+    let invite = a.write_invite()?;
+    let b = Peer::join(&tmp.path().join("b"), &invite).await?;
     let b_config_before = std::fs::read_to_string(Layout::new(&b.dir).config())?;
 
     let mut evil = FileDoc::new(actor_for(&a.vault.author()));
@@ -225,8 +224,8 @@ async fn hostile_keys_are_ignored() -> Result<()> {
 async fn read_only_member_materializes_but_never_publishes() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let a = Peer::init(&tmp.path().join("a")).await?;
-    let ticket = a.vault.ticket(ShareMode::Read, &[]).await?;
-    let b = Peer::join(&tmp.path().join("b"), &ticket).await?;
+    let invite = a.read_invite()?;
+    let b = Peer::join(&tmp.path().join("b"), &invite).await?;
     assert!(!b.vault.can_write());
     a.write("f.txt", "v1\n")?;
     wait_for_file(&b, "f.txt", Some("v1\n")).await?;

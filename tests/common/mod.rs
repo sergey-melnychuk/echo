@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
-use iroh_docs::DocTicket;
 use vaultsync::engine::{Engine, Running};
 use vaultsync::filedoc::{actor_for, Content, FileDoc, Visible};
+use vaultsync::invite::Invite;
 use vaultsync::node::NetOptions;
 use vaultsync::vault::Vault;
 
@@ -41,14 +42,32 @@ impl Peer {
         Self::start(dir, vault).await
     }
 
-    pub async fn join(dir: &Path, ticket: &DocTicket) -> Result<Peer> {
+    pub async fn join(dir: &Path, invite: &Invite) -> Result<Peer> {
         init_tracing();
-        let vault = Vault::join(dir, ticket.clone(), &NetOptions::loopback()).await?;
+        let vault = Vault::join(dir, invite, &NetOptions::loopback()).await?;
         Self::start(dir, vault).await
+    }
+
+    /// A bearer write invite valid for an hour (tests only).
+    pub fn write_invite(&self) -> Result<Invite> {
+        self.vault
+            .invite(ShareMode::Write, None, Duration::from_secs(3600))
+    }
+
+    /// A bearer read invite valid for an hour (tests only).
+    pub fn read_invite(&self) -> Result<Invite> {
+        self.vault
+            .invite(ShareMode::Read, None, Duration::from_secs(3600))
     }
 
     pub async fn open(dir: &Path) -> Result<Peer> {
         let vault = Vault::open(dir, &NetOptions::loopback()).await?;
+        Self::start(dir, vault).await
+    }
+
+    /// Start the engine for a vault that was opened or created by the caller.
+    pub async fn from_vault(dir: &Path, vault: Vault) -> Result<Peer> {
+        init_tracing();
         Self::start(dir, vault).await
     }
 

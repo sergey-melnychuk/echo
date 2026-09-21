@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
-use iroh_docs::DocTicket;
+use vaultsync::invite::Invite;
 use vaultsync::node::NetOptions;
 use vaultsync::vault::Vault;
 
 const DEADLINE: Duration = Duration::from_secs(30);
+const HOUR: Duration = Duration::from_secs(3600);
 
 async fn wait_for_entry(vault: &Vault, key: &str, value: &[u8]) -> Result<()> {
     let deadline = Instant::now() + DEADLINE;
@@ -32,10 +33,10 @@ async fn wait_for_entry(vault: &Vault, key: &str, value: &[u8]) -> Result<()> {
     }
 }
 
-async fn joined(dir: &Path, ticket: &DocTicket, net: &NetOptions) -> Result<Vault> {
-    // Round-trip the ticket through its string form, as the CLI does.
-    let ticket: DocTicket = ticket.to_string().parse()?;
-    let vault = Vault::join(dir, ticket, net).await?;
+async fn joined(dir: &Path, invite: &Invite, net: &NetOptions) -> Result<Vault> {
+    // Round-trip the invite through its string form, as the CLI does.
+    let invite: Invite = invite.to_string().parse()?;
+    let vault = Vault::join(dir, &invite, net).await?;
     vault.start_sync().await?;
     Ok(vault)
 }
@@ -45,9 +46,10 @@ async fn two_nodes_sync_entries_both_ways() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let net = NetOptions::loopback();
     let a = Vault::init(&tmp.path().join("a"), &net).await?;
+    a.start_sync().await?;
     assert!(a.can_write());
-    let ticket = a.ticket(ShareMode::Write, &[]).await?;
-    let b = joined(&tmp.path().join("b"), &ticket, &net).await?;
+    let invite = a.invite(ShareMode::Write, None, HOUR)?;
+    let b = joined(&tmp.path().join("b"), &invite, &net).await?;
     assert!(b.can_write());
     assert_eq!(b.id(), a.id());
     assert_ne!(b.endpoint_id(), a.endpoint_id());
@@ -83,8 +85,9 @@ async fn late_joiner_catches_up() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let net = NetOptions::loopback();
     let a = Vault::init(&tmp.path().join("a"), &net).await?;
-    let ticket = a.ticket(ShareMode::Write, &[]).await?;
-    let b = joined(&tmp.path().join("b"), &ticket, &net).await?;
+    a.start_sync().await?;
+    let invite = a.invite(ShareMode::Write, None, HOUR)?;
+    let b = joined(&tmp.path().join("b"), &invite, &net).await?;
     for i in 0..5 {
         a.set(format!("a/{i}"), format!("from a {i}")).await?;
         b.set(format!("b/{i}"), format!("from b {i}")).await?;
@@ -94,7 +97,7 @@ async fn late_joiner_catches_up() -> Result<()> {
 
     // C only knows A's address from the ticket, and must end up with
     // everything, including B's entries.
-    let c = joined(&tmp.path().join("c"), &ticket, &net).await?;
+    let c = joined(&tmp.path().join("c"), &invite, &net).await?;
     for i in 0..5 {
         wait_for_entry(&c, &format!("a/{i}"), format!("from a {i}").as_bytes()).await?;
         wait_for_entry(&c, &format!("b/{i}"), format!("from b {i}").as_bytes()).await?;
@@ -115,9 +118,10 @@ async fn state_survives_restart() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let net = NetOptions::loopback();
     let a = Vault::init(&tmp.path().join("a"), &net).await?;
-    let ticket = a.ticket(ShareMode::Write, &[]).await?;
+    a.start_sync().await?;
+    let invite = a.invite(ShareMode::Write, None, HOUR)?;
     let b_dir = tmp.path().join("b");
-    let b = joined(&b_dir, &ticket, &net).await?;
+    let b = joined(&b_dir, &invite, &net).await?;
     a.set("k1", "v1").await?;
     wait_for_entry(&b, "k1", b"v1").await?;
     let b_id = b.endpoint_id();
@@ -151,15 +155,17 @@ async fn read_ticket_holder_cannot_publish() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let net = NetOptions::loopback();
     let a = Vault::init(&tmp.path().join("a"), &net).await?;
-    let ticket = a.ticket(ShareMode::Read, &[]).await?;
-    let b = joined(&tmp.path().join("b"), &ticket, &net).await?;
+    a.start_sync().await?;
+    let invite = a.invite(ShareMode::Read, None, HOUR)?;
+    let b = joined(&tmp.path().join("b"), &invite, &net).await?;
     assert!(!b.can_write());
     a.set("k1", "v1").await?;
     wait_for_entry(&b, "k1", b"v1").await?;
     assert!(b.set("k2", "v2").await.is_err());
-    assert!(b.ticket(ShareMode::Write, &[]).await.is_err());
-    let read_again = b.ticket(ShareMode::Read, &[]).await?;
-    assert_eq!(read_again.capability.id(), a.id());
+    assert!(b.invite(ShareMode::Write, None, HOUR).is_err());
+    // A bearer token may be delegated further, narrowed to read.
+    let read_again = b.invite(ShareMode::Read, None, HOUR)?;
+    assert_eq!(read_again.doc_ticket()?.capability.id(), a.id());
     a.shutdown().await?;
     b.shutdown().await?;
     Ok(())

@@ -14,7 +14,6 @@ use common::{
 };
 use iroh_blobs::api::blobs::BlobStatus;
 use iroh_blobs::Hash;
-use iroh_docs::api::protocol::ShareMode;
 use vaultsync::chunker::MIN_CHUNK;
 use vaultsync::config::{self, Layout};
 use vaultsync::filedoc::{Content, VersionKind};
@@ -43,8 +42,8 @@ async fn ten_mib_file_transfers_intact_and_an_edit_moves_one_chunk() -> Result<(
     // Present before the engine starts: imported by the scan.
     write_file(&a_dir.join("big.bin"), &data)?;
     let a = Peer::init(&a_dir).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
-    let b = Peer::join(&tmp.path().join("b"), &ticket).await?;
+    let invite = a.write_invite()?;
+    let b = Peer::join(&tmp.path().join("b"), &invite).await?;
     wait_for_bytes(&b, "big.bin", Some(&data)).await?;
     let before = blob_inventory(&b).await?;
     let chunks_before = before.values().filter(|s| **s >= MIN_CHUNK as u64).count();
@@ -83,9 +82,9 @@ async fn ten_mib_file_transfers_intact_and_an_edit_moves_one_chunk() -> Result<(
 async fn partitioned_concurrent_binary_edit_has_one_winner_and_keeps_the_loser() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let a = Peer::init(&tmp.path().join("a")).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
+    let invite = a.write_invite()?;
     let b_dir = tmp.path().join("b");
-    let b = Peer::join(&b_dir, &ticket).await?;
+    let b = Peer::join(&b_dir, &invite).await?;
     let v0 = random_bytes(200 << 10, 1);
     write_file(&a.path("bin.dat"), &v0)?;
     wait_for_bytes(&b, "bin.dat", Some(&v0)).await?;
@@ -184,8 +183,8 @@ async fn partitioned_concurrent_binary_edit_has_one_winner_and_keeps_the_loser()
 async fn text_file_switches_to_binary_and_back_and_is_deleted() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let a = Peer::init(&tmp.path().join("a")).await?;
-    let ticket = a.vault.ticket(ShareMode::Write, &[]).await?;
-    let b = Peer::join(&tmp.path().join("b"), &ticket).await?;
+    let invite = a.write_invite()?;
+    let b = Peer::join(&tmp.path().join("b"), &invite).await?;
 
     a.write("f.dat", "plain text first\n")?;
     wait_for_file(&b, "f.dat", Some("plain text first\n")).await?;

@@ -16,6 +16,7 @@ use iroh_docs::ALPN as DOCS_ALPN;
 use iroh_gossip::net::Gossip;
 use iroh_gossip::ALPN as GOSSIP_ALPN;
 
+use crate::auth::{self, AuthConfig};
 use crate::config::Layout;
 
 /// Which network the endpoint joins.
@@ -34,6 +35,10 @@ pub struct NetOptions {
     pub network: Network,
     /// Bind to this UDP address instead of a random port.
     pub bind: Option<SocketAddr>,
+    /// Override the authentication handshake timeout (tests).
+    pub handshake_timeout: Option<std::time::Duration>,
+    /// Override the number of authentication handshakes served at once (tests).
+    pub max_in_flight: Option<usize>,
 }
 
 impl NetOptions {
@@ -41,6 +46,8 @@ impl NetOptions {
         Self {
             network: Network::Production,
             bind: None,
+            handshake_timeout: None,
+            max_in_flight: None,
         }
     }
 
@@ -48,6 +55,8 @@ impl NetOptions {
         Self {
             network: Network::Loopback,
             bind: None,
+            handshake_timeout: None,
+            max_in_flight: None,
         }
     }
 }
@@ -60,13 +69,21 @@ pub struct Node {
     downloader: Downloader,
     docs: Docs,
     router: Router,
+    /// The outgoing pre-authentication task, when admission is on.
+    auth_task: Option<tokio::task::JoinHandle<()>>,
     /// Held until [`Node::shutdown`]; see [`Node::lock`].
     lock_file: std::fs::File,
 }
 
 impl Node {
-    /// Bind the endpoint, open the stores under `layout` and mount the protocols.
-    pub async fn spawn(layout: &Layout, secret: SecretKey, net: &NetOptions) -> Result<Node> {
+    /// Bind the endpoint, open the stores under `layout` and mount the
+    /// protocols. With `auth`, the endpoint hook gates every ALPN (SEC-1).
+    pub async fn spawn(
+        layout: &Layout,
+        secret: SecretKey,
+        net: &NetOptions,
+        auth: Option<AuthConfig>,
+    ) -> Result<Node> {
         layout.create_dirs()?;
         let lock = Self::lock(layout)?;
         let mut builder = match net.network {
@@ -78,6 +95,12 @@ impl Node {
         };
         if let Some(addr) = net.bind {
             builder = builder.clear_ip_transports().bind_addr(addr)?;
+        }
+        let mut auth_parts = None;
+        if let Some(config) = auth {
+            let (hook, task, protocol) = auth::build(config);
+            builder = builder.hooks(hook);
+            auth_parts = Some((task, protocol));
         }
         let endpoint = builder
             .secret_key(secret)
@@ -93,17 +116,23 @@ impl Node {
             .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
             .await
             .with_context(|| format!("opening docs store {}", layout.docs().display()))?;
-        let router = Router::builder(endpoint.clone())
+        let mut router = Router::builder(endpoint.clone())
             .accept(BLOBS_ALPN, BlobsProtocol::new(&blobs, None))
             .accept(GOSSIP_ALPN, gossip)
-            .accept(DOCS_ALPN, docs.clone())
-            .spawn();
+            .accept(DOCS_ALPN, docs.clone());
+        let mut auth_task = None;
+        if let Some((task, protocol)) = auth_parts {
+            auth_task = Some(task.spawn(endpoint.clone()));
+            router = router.accept(auth::ALPN, protocol);
+        }
+        let router = router.spawn();
         Ok(Node {
             endpoint,
             blobs,
             downloader,
             docs,
             router,
+            auth_task,
             lock_file: lock,
         })
     }
@@ -177,6 +206,9 @@ impl Node {
             .await
             .context("shutting the router down")?;
         self.endpoint.close().await;
+        if let Some(task) = &self.auth_task {
+            task.abort();
+        }
         if let Err(err) = self.lock_file.unlock() {
             tracing::warn!("releasing the vault lock: {err}");
         }

@@ -2,6 +2,8 @@
 //! `invite`, `status`. `run` and `join` are exercised through the library in
 //! `tests/plumbing.rs`.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::Capability;
@@ -9,6 +11,8 @@ use vaultsync::cli::{execute, make_invite, Cli, Command, ConflictAction};
 use vaultsync::config::{self, Layout};
 use vaultsync::node::NetOptions;
 use vaultsync::vault::Vault;
+
+const HOUR: Duration = Duration::from_secs(3600);
 
 fn cli(command: Command) -> Cli {
     Cli {
@@ -35,24 +39,35 @@ async fn init_whoami_invite_status() -> Result<()> {
     assert!(!fresh_layout.is_initialized());
 
     // Without a recorded address the invite carries the id only.
-    let ticket = make_invite(&layout, ShareMode::Write, &[])?;
+    let invite = make_invite(&layout, ShareMode::Write, None, HOUR, &[])?;
+    let ticket = invite.doc_ticket()?;
     assert_eq!(ticket.nodes.len(), 1);
     assert_eq!(ticket.nodes[0].id, key.public());
     assert!(ticket.nodes[0].addrs.is_empty());
     assert!(matches!(ticket.capability, Capability::Write(_)));
-    let read = make_invite(&layout, ShareMode::Read, &["127.0.0.1:4711".parse()?])?;
-    assert!(matches!(read.capability, Capability::Read(_)));
-    assert_eq!(read.nodes[0].addrs.len(), 1);
-    // The ticket string round-trips.
-    let parsed: iroh_docs::DocTicket = ticket.to_string().parse()?;
-    assert_eq!(parsed.capability.id(), ticket.capability.id());
+    assert!(invite.delegatable);
+    let fresh_key = config::load_secret_key(&fresh_layout.endpoint_key())?;
+    let read = make_invite(
+        &layout,
+        ShareMode::Read,
+        Some(fresh_key.public()),
+        HOUR,
+        &["127.0.0.1:4711".parse()?],
+    )?;
+    let read_ticket = read.doc_ticket()?;
+    assert!(matches!(read_ticket.capability, Capability::Read(_)));
+    assert_eq!(read_ticket.nodes[0].addrs.len(), 1);
+    assert!(!read.delegatable);
+    // The invite string round-trips.
+    let parsed: vaultsync::invite::Invite = invite.to_string().parse()?;
+    assert_eq!(parsed, invite);
 
     // After a node ran, the invite carries the recorded address.
     let vault = Vault::open(&dir, &NetOptions::loopback()).await?;
     vault.save_own_addr()?;
     let bound = vault.node().addr();
     vault.shutdown().await?;
-    let ticket = make_invite(&layout, ShareMode::Write, &[])?;
+    let ticket = make_invite(&layout, ShareMode::Write, None, HOUR, &[])?.doc_ticket()?;
     assert_eq!(ticket.nodes[0].addrs, bound.addrs);
     assert!(!ticket.nodes[0].addrs.is_empty());
 
@@ -60,6 +75,8 @@ async fn init_whoami_invite_status() -> Result<()> {
         dir: dir.clone(),
         write: true,
         read: false,
+        audience: Some(fresh_key.public().to_string()),
+        ttl: "12h".into(),
         addr: vec![],
     }))
     .await?;
@@ -67,6 +84,18 @@ async fn init_whoami_invite_status() -> Result<()> {
         dir: dir.clone(),
         write: false,
         read: false,
+        audience: None,
+        ttl: "1h".into(),
+        addr: vec![],
+    }))
+    .await
+    .is_err());
+    assert!(execute(cli(Command::Invite {
+        dir: dir.clone(),
+        write: true,
+        read: false,
+        audience: Some("not-an-id".into()),
+        ttl: "1h".into(),
         addr: vec![],
     }))
     .await
@@ -95,13 +124,25 @@ async fn read_only_member_cannot_make_write_invites() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let net = NetOptions::loopback();
     let a = Vault::init(&tmp.path().join("a"), &net).await?;
-    let ticket = a.ticket(ShareMode::Read, &[]).await?;
     let b_dir = tmp.path().join("b");
-    let b = Vault::join(&b_dir, ticket, &net).await?;
+    // A bound read invite for B.
+    let b_key = config::load_or_create_secret_key(&Layout::new(&b_dir).endpoint_key())?;
+    let invite = a.invite(ShareMode::Read, Some(b_key.public()), HOUR)?;
+    let b = Vault::join(&b_dir, &invite, &net).await?;
     b.shutdown().await?;
     a.shutdown().await?;
     let layout = Layout::new(&b_dir);
-    assert!(make_invite(&layout, ShareMode::Write, &[]).is_err());
-    assert!(make_invite(&layout, ShareMode::Read, &[]).is_ok());
+    // Read-only, and bound: neither a write invite nor a delegation.
+    assert!(make_invite(&layout, ShareMode::Write, None, HOUR, &[]).is_err());
+    assert!(make_invite(&layout, ShareMode::Read, None, HOUR, &[]).is_err());
+    // The owner can always invite.
+    assert!(make_invite(
+        &Layout::new(tmp.path().join("a")),
+        ShareMode::Read,
+        None,
+        HOUR,
+        &[]
+    )
+    .is_ok());
     Ok(())
 }

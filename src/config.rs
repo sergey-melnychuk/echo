@@ -54,6 +54,16 @@ impl Layout {
         self.dot().join("vault.key")
     }
 
+    /// The Biscuit root private key (owner only), hex, 0600.
+    pub fn root_key(&self) -> PathBuf {
+        self.dot().join("root.key")
+    }
+
+    /// This device's own Biscuit token, base64url, 0600.
+    pub fn token(&self) -> PathBuf {
+        self.dot().join("token")
+    }
+
     /// Known peers with their last known addresses (JSON).
     pub fn peers(&self) -> PathBuf {
         self.dot().join("peers.json")
@@ -123,6 +133,14 @@ pub struct Config {
     pub vault_id: String,
     /// Whether this device holds the namespace secret and may publish.
     pub write: bool,
+    /// The vault's Biscuit root public key, hex. Absent only on vaults that
+    /// were created without admission (tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_public_key: Option<String>,
+    /// Whether this device's token carries no audience check and may be
+    /// narrowed and passed on with `delegate`.
+    #[serde(default)]
+    pub token_delegatable: bool,
 }
 
 impl Config {
@@ -130,6 +148,8 @@ impl Config {
         Self {
             vault_id: id.to_string(),
             write,
+            root_public_key: None,
+            token_delegatable: false,
         }
     }
 
@@ -147,6 +167,27 @@ impl Config {
     pub fn namespace_id(&self) -> Result<NamespaceId> {
         Ok(NamespaceId::from(&parse_hex32(&self.vault_id)?))
     }
+}
+
+/// Store raw bytes (a token or a key) as base64url text with mode 0600.
+pub fn save_bytes_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_private(
+        path,
+        data_encoding::BASE64URL_NOPAD.encode(bytes).as_bytes(),
+    )
+}
+
+/// Load bytes stored with [`save_bytes_private`]; `None` when the file is absent.
+pub fn load_bytes_private(path: &Path) -> Result<Option<Vec<u8>>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(
+        data_encoding::BASE64URL_NOPAD
+            .decode(text.trim().as_bytes())
+            .with_context(|| format!("{} is not valid base64url", path.display()))?,
+    ))
 }
 
 /// Load the endpoint secret key, generating and storing a new one if the file
