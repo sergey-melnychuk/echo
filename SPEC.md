@@ -4,8 +4,9 @@ Date: 2026-09-21. Crate versions were checked against docs.rs on that date.
 
 > This document is the second design and the one this repository implements.
 > Where it says "SPEC.md" it refers to an earlier design that built the wire
-> protocol, storage, signaling and fetching by hand; that document is not part
-> of this repository, and section 11 summarizes how the two differ.
+> protocol, storage, signaling and fetching by hand. That design and its
+> implementation are kept, unchanged and unbuilt, under `soundcheck/`; section
+> 11 summarizes how the two differ.
 
 ## 0. Summary
 

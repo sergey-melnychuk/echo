@@ -144,6 +144,13 @@ section 7 and NOTES.md have the details.
   reference and are not usage examples.
 - `scripts/gate.sh` runs the four gates every commit must pass; the GitHub
   workflow runs the same script on Linux and macOS.
+- `soundcheck/` is the predecessor: the first design (its own `SPEC.md`,
+  which this repository's SPEC.md compares against in section 11) and a
+  complete implementation of it on iroh 1.x with a hand-built wire protocol,
+  redb storage, signed gossip signaling, a parallel chunk fetcher and a
+  custom token format. It is a separate Cargo package with its own notes,
+  status and gate script, kept for the record; nothing here builds or
+  references it, and it is not developed further.
 
 ## License
 

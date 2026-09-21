@@ -1,0 +1,41 @@
+[package]
+name = "p2p-sync-poc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+
+[dependencies]
+tokio = { version = "1.47", features = ["full"] }
+iroh = "1.2"
+iroh-gossip = "0.101"
+fastcdc = "5.0"
+blake3 = "1.8"
+ed25519-dalek = { version = "3.0", features = ["serde", "rand_core"] }
+rand = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+bincode = { version = "2.0", features = ["serde"] }
+redb = "4.3"
+parking_lot = "0.12"
+notify = "8.2"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-lite = "2"
+hex = "0.4"
+# Not in SPEC section 4: iroh-gossip takes and yields `bytes::Bytes` and does
+# not re-export the type. See NOTES.md, stage 6.
+bytes = "1"
+# Not in SPEC section 4: config.toml needs a TOML codec. See NOTES.md, stage 9.
+toml = "1"
+
+[dev-dependencies]
+tempfile = "3.20"
+proptest = "1.7"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
