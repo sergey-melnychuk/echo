@@ -600,3 +600,23 @@ real modules are written from the API notes above, not by moving spike code.
    specified.
 3. Read versus write stays with docs tickets; Biscuit decides admission,
    audience, expiry and delegation only.
+
+## Measured size of the custom code
+
+SPEC.md section 2 estimated the custom code and asked for measurements.
+Lines excluding unit tests, at the end of stage 5:
+
+| Piece (SPEC.md) | Estimate | Measured | Files |
+| --- | --- | --- | --- |
+| Auth (Biscuit plus hooks) | 250 | 632 | `auth.rs` 515, `invite.rs` 117 |
+| File documents and winner rule | 300 | 384 | `filedoc.rs` 310, `paths.rs` 74 |
+| Chunker, manifest, assembler | 200 | 199 | `chunker.rs` |
+| Sync engine, watcher, state file | 500 | 1,196 | `engine.rs` 1,131, `watcher.rs` 65 |
+| CLI, config, invite, node, vault | 250 | 1,328 | `cli.rs` 302, `config.rs` 348, `node.rs` 217, `vault.rs` 432, `lib.rs`, `main.rs` |
+
+About 3,700 lines of non-test code against an estimate of 1,500; the engine
+(three-way merge against the on-disk base, conflict copies, retries, limits)
+and the vault and config plumbing (keys, tokens, peers, invites, lock) carry
+most of the difference. Tests: 1,840 lines in `tests/` plus unit tests in
+the modules; 50 tests, the whole suite in about 44 s in a debug build. The
+stage 0 spike programs under `examples/` are another 1,440 lines.
