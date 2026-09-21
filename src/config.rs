@@ -138,9 +138,16 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_public_key: Option<String>,
     /// Whether this device's token carries no audience check and may be
-    /// narrowed and passed on with `delegate`.
+    /// narrowed and passed on with `invite`.
     #[serde(default)]
     pub token_delegatable: bool,
+    /// Files larger than this are never published (default 1 GiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_bytes: Option<u64>,
+    /// Once the vault holds this many paths, new paths are not published
+    /// (default 100,000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries: Option<usize>,
 }
 
 impl Config {
@@ -150,6 +157,8 @@ impl Config {
             write,
             root_public_key: None,
             token_delegatable: false,
+            max_file_bytes: None,
+            max_entries: None,
         }
     }
 

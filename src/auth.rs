@@ -41,6 +41,11 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_IN_FLIGHT: usize = 16;
 /// SEC-1: how long a verified token admits its endpoint.
 pub const ADMISSION_TTL: Duration = Duration::from_secs(600);
+/// How long the outgoing side skips the handshake to a remote it just
+/// authenticated to. Short on purpose: a remote that restarts forgets whom
+/// it admitted, and a stale cache would make every connection to it fail
+/// with 403 until the cache expired (NOTES.md, stage 5).
+pub const OUTGOING_CACHE_TTL: Duration = Duration::from_secs(3);
 
 const CLOSE_ACCEPTED: u32 = 1;
 const CLOSE_DENIED: u32 = 403;
@@ -216,14 +221,22 @@ impl Admitted {
 
 // --- hook ----------------------------------------------------------------------
 
-type PreAuthRequest = (EndpointAddr, oneshot::Sender<bool>);
+/// Messages from the hook to the outgoing task.
+enum ToTask {
+    /// Pre-authenticate to this remote and report whether to proceed.
+    PreAuth(EndpointAddr, oneshot::Sender<bool>),
+    /// A connection to this remote was closed with 403: it no longer
+    /// remembers us (it restarted, or our admission lapsed). Forget the
+    /// cached handshake so the next connection authenticates again.
+    Forget(EndpointId),
+}
 
 /// Mount on the endpoint builder.
 #[derive(Debug)]
 pub struct AuthHook {
     admitted: Arc<Admitted>,
     ttl: Duration,
-    tx: mpsc::Sender<PreAuthRequest>,
+    tx: mpsc::Sender<ToTask>,
 }
 
 impl EndpointHooks for AuthHook {
@@ -236,7 +249,12 @@ impl EndpointHooks for AuthHook {
             return BeforeConnectOutcome::Accept;
         }
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send((remote.clone(), reply_tx)).await.is_err() {
+        if self
+            .tx
+            .send(ToTask::PreAuth(remote.clone(), reply_tx))
+            .await
+            .is_err()
+        {
             return BeforeConnectOutcome::Reject;
         }
         match reply_rx.await {
@@ -252,12 +270,27 @@ impl EndpointHooks for AuthHook {
     }
 
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
-        // Connections we opened were pre-authenticated by the remote's gate;
-        // the auth ALPN itself is always open (it carries the token).
-        if conn.side() == Side::Client
-            || conn.alpn() == ALPN
-            || self.admitted.is_admitted(&conn.remote_id(), self.ttl)
-        {
+        if conn.side() == Side::Client {
+            // A connection we opened: the remote's gate decides. Watch how it
+            // ends, so a 403 invalidates our cached handshake for that remote.
+            if conn.alpn() != ALPN {
+                let remote = conn.remote_id();
+                let closed = conn.weak_handle().closed();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    if let Some(closed) = closed.await {
+                        if let ConnectionError::ApplicationClosed(close) = &closed.reason {
+                            if close.error_code.into_inner() as u32 == CLOSE_DENIED {
+                                let _ = tx.send(ToTask::Forget(remote)).await;
+                            }
+                        }
+                    }
+                });
+            }
+            return AfterHandshakeOutcome::Accept;
+        }
+        // The auth ALPN itself is always open (it carries the token).
+        if conn.alpn() == ALPN || self.admitted.is_admitted(&conn.remote_id(), self.ttl) {
             AfterHandshakeOutcome::Accept
         } else {
             tracing::info!(
@@ -279,9 +312,8 @@ impl EndpointHooks for AuthHook {
 /// bound endpoint.
 pub struct AuthTask {
     token: Vec<u8>,
-    ttl: Duration,
     timeout: Duration,
-    rx: mpsc::Receiver<PreAuthRequest>,
+    rx: mpsc::Receiver<ToTask>,
 }
 
 impl fmt::Debug for AuthTask {
@@ -296,17 +328,31 @@ impl AuthTask {
     }
 
     async fn run(mut self, endpoint: Endpoint) {
-        // Remotes we authenticated to, and when. Re-authenticate a little
-        // before the remote's admission window closes.
+        // Remotes we authenticated to, and when; coalesces the burst of
+        // connections the protocols open together.
         let mut allowed: HashMap<EndpointId, Instant> = HashMap::new();
-        let refresh = self.ttl.mul_f32(0.9);
         let mut pending: HashMap<EndpointId, Vec<oneshot::Sender<bool>>> = HashMap::new();
         let mut handshakes: JoinSet<(EndpointId, Result<()>)> = JoinSet::new();
         loop {
             tokio::select! {
                 request = self.rx.recv() => {
-                    let Some((remote, reply)) = request else { break };
-                    if allowed.get(&remote.id).is_some_and(|since| since.elapsed() < refresh) {
+                    let (remote, reply) = match request {
+                        Some(ToTask::PreAuth(remote, reply)) => (remote, reply),
+                        Some(ToTask::Forget(id)) => {
+                            if allowed.remove(&id).is_some() {
+                                tracing::info!(
+                                    "{} no longer admits us; authenticating again next time",
+                                    id.fmt_short()
+                                );
+                            }
+                            continue;
+                        }
+                        None => break,
+                    };
+                    if allowed
+                        .get(&remote.id)
+                        .is_some_and(|since| since.elapsed() < OUTGOING_CACHE_TTL)
+                    {
                         reply.send(true).ok();
                         continue;
                     }
@@ -455,7 +501,6 @@ pub fn build(config: AuthConfig) -> (AuthHook, AuthTask, AuthProtocol) {
     };
     let task = AuthTask {
         token: config.token,
-        ttl: config.admission_ttl,
         timeout: config.handshake_timeout,
         rx,
     };

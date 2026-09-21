@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use crate::chunker;
-use crate::config::{self, ConflictIndex, Layout, LoserInfo};
+use crate::config::{self, Config, ConflictIndex, Layout, LoserInfo};
 use crate::filedoc::{self, Content, FileDoc, Version, VersionKind, Visible, MAX_TEXT_BYTES};
 use crate::paths;
 use crate::vault::Vault;
@@ -51,6 +52,37 @@ pub enum Outcome {
     /// The file on disk is not what this device last saw there: an
     /// unpublished local change that must be published first (CRD-1).
     LocalChange,
+}
+
+/// How long to wait for a document snapshot fetched from peers.
+const SNAPSHOT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Resource limits (SPEC.md stage 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Files larger than this are never published.
+    pub max_file_bytes: u64,
+    /// New paths are not published once the vault holds this many.
+    pub max_entries: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 1 << 30,
+            max_entries: 100_000,
+        }
+    }
+}
+
+impl Limits {
+    pub fn from_config(config: &Config) -> Limits {
+        let defaults = Limits::default();
+        Limits {
+            max_file_bytes: config.max_file_bytes.unwrap_or(defaults.max_file_bytes),
+            max_entries: config.max_entries.unwrap_or(defaults.max_entries),
+        }
+    }
 }
 
 /// One entry of `state.json`.
@@ -100,12 +132,28 @@ struct State {
 }
 
 impl State {
+    /// Load the state file. An unreadable file is set aside as
+    /// `state.json.corrupt` and the engine starts from an empty state: every
+    /// file then looks new and is re-published if it differs from the vault,
+    /// which is safe, only slower.
     fn load(path: &Path) -> Result<State> {
         if !path.is_file() {
             return Ok(State::default());
         }
         let text = std::fs::read_to_string(path)?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        match serde_json::from_str(&text) {
+            Ok(state) => Ok(state),
+            Err(err) => {
+                let aside = path.with_extension("json.corrupt");
+                tracing::warn!(
+                    "{} is unreadable ({err}); moving it to {} and starting from an empty state",
+                    path.display(),
+                    aside.display()
+                );
+                std::fs::rename(path, &aside)?;
+                Ok(State::default())
+            }
+        }
     }
 
     fn save(&self, path: &Path) -> Result<()> {
@@ -152,12 +200,21 @@ pub struct Engine {
     pending: Mutex<HashMap<Hash, HashSet<String>>>,
     /// Keys whose blob download failed; retried when a peer shows up.
     retry: Mutex<HashSet<String>>,
+    limits: Limits,
+    /// Number of distinct paths in the vault, refreshed by the scan.
+    key_count: AtomicUsize,
     /// Serializes every publish and apply.
     work: tokio::sync::Mutex<()>,
 }
 
 impl Engine {
+    /// An engine with the limits from the vault's config.
     pub fn new(vault: Arc<Vault>) -> Result<Engine> {
+        let limits = Limits::from_config(vault.config());
+        Self::with_limits(vault, limits)
+    }
+
+    pub fn with_limits(vault: Arc<Vault>, limits: Limits) -> Result<Engine> {
         let layout = vault.layout().clone();
         let root = layout
             .root()
@@ -165,6 +222,7 @@ impl Engine {
             .with_context(|| format!("canonicalizing {}", layout.root().display()))?;
         let state = State::load(&layout.state())?;
         let conflicts = config::load_conflicts(&layout.conflicts_index())?;
+        clean_tmp(&layout.tmp());
         Ok(Engine {
             actor: filedoc::actor_for(&vault.author()),
             vault,
@@ -174,8 +232,14 @@ impl Engine {
             conflicts: Mutex::new(conflicts),
             pending: Mutex::new(HashMap::new()),
             retry: Mutex::new(HashSet::new()),
+            limits,
+            key_count: AtomicUsize::new(0),
             work: tokio::sync::Mutex::new(()),
         })
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     pub fn vault(&self) -> &Vault {
@@ -301,7 +365,9 @@ impl Engine {
                 tracing::warn!("scan publish deletion {key}: {err:#}");
             }
         }
-        for key in self.all_keys().await? {
+        let keys = self.all_keys().await?;
+        self.key_count.store(keys.len(), Ordering::Relaxed);
+        for key in keys {
             if let Err(err) = self.apply_locked(&key).await {
                 tracing::warn!("scan apply {key}: {err:#}");
             }
@@ -403,16 +469,17 @@ impl Engine {
                         return Ok(());
                     }
                 };
-                if content_status == ContentStatus::Complete {
-                    self.apply_path(&key).await?;
-                } else {
+                if content_status != ContentStatus::Complete {
                     self.pending
                         .lock()
                         .expect("pending")
                         .entry(entry.content_hash())
                         .or_default()
-                        .insert(key);
+                        .insert(key.clone());
                 }
+                // Apply right away even when docs is still downloading the
+                // content: `load_merged` fetches missing snapshots itself.
+                self.apply_path(&key).await?;
             }
             LiveEvent::ContentReady { hash } => {
                 let keys = self.pending.lock().expect("pending").remove(&hash);
@@ -561,14 +628,21 @@ impl Engine {
             }
             let hash = entry.content_hash();
             if !self.vault.has_content(hash).await? {
-                // Remember the key so the `ContentReady` for this hash
-                // triggers an apply even if the insert event was missed.
+                // Docs downloads an entry's content only from the peer that
+                // sent the entry, and gives up when that connection drops.
+                // Fetch the snapshot ourselves from every known peer.
+                self.fetch_snapshot(key, hash).await;
+            }
+            if !self.vault.has_content(hash).await? {
+                // Remember the key so the `ContentReady` for this hash, or the
+                // next peer event, triggers another apply.
                 self.pending
                     .lock()
                     .expect("pending")
                     .entry(hash)
                     .or_default()
                     .insert(key.to_string());
+                self.retry.lock().expect("retry").insert(key.to_string());
                 if !self.vault.has_content(hash).await? {
                     tracing::debug!("{key}: snapshot {} not downloaded yet", hash.fmt_short());
                     continue;
@@ -588,6 +662,24 @@ impl Engine {
             }
         }
         Ok(merged)
+    }
+
+    /// Download one document snapshot from any known peer; failures are
+    /// logged and left to the retry paths.
+    async fn fetch_snapshot(&self, key: &str, hash: Hash) {
+        let peers = match self.vault.peer_ids() {
+            Ok(peers) if !peers.is_empty() => peers,
+            _ => return,
+        };
+        let download = self.vault.node().downloader().download(hash, peers);
+        match tokio::time::timeout(SNAPSHOT_FETCH_TIMEOUT, download).await {
+            Ok(Ok(())) => tracing::debug!("{key}: fetched snapshot {}", hash.fmt_short()),
+            Ok(Err(err)) => tracing::debug!(
+                "{key}: fetching snapshot {} failed: {err}",
+                hash.fmt_short()
+            ),
+            Err(_) => tracing::debug!("{key}: fetching snapshot {} timed out", hash.fmt_short()),
+        }
     }
 
     async fn own_heads(&self, key: &str) -> Result<Option<Vec<ChangeHash>>> {
@@ -641,6 +733,15 @@ impl Engine {
             return Ok(Outcome::Skipped("read-only".into()));
         }
         let disk = self.read_disk(key)?;
+        if let Some(size) = disk.as_ref().map(|d| d.size) {
+            if size > self.limits.max_file_bytes {
+                tracing::warn!(
+                    "{key}: {size} bytes exceeds the file size limit of {}; not published",
+                    self.limits.max_file_bytes
+                );
+                return Ok(Outcome::Skipped("too large".into()));
+            }
+        }
         let disk_hash = disk.as_ref().map(|d| d.hash.clone());
         // An echo of this engine's own write (the bytes on disk are exactly
         // what the state file recorded) is not a user write: it must not
@@ -656,7 +757,18 @@ impl Engine {
             None if matches!(content, None | Some(Content::Deleted)) => {
                 return Ok(Outcome::Nothing)
             }
-            None => FileDoc::new(self.actor.clone()),
+            None => {
+                let count = self.key_count.load(Ordering::Relaxed);
+                if count >= self.limits.max_entries {
+                    tracing::warn!(
+                        "{key}: the vault already holds {count} paths (limit {}); not published",
+                        self.limits.max_entries
+                    );
+                    return Ok(Outcome::Skipped("entry limit".into()));
+                }
+                self.key_count.fetch_add(1, Ordering::Relaxed);
+                FileDoc::new(self.actor.clone())
+            }
         };
         let changed = match &content {
             Some(content) => self.ingest(key, &mut doc, content)?,
@@ -949,6 +1061,23 @@ impl Engine {
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("renaming into {}", path.display()))?;
         Ok(())
+    }
+}
+
+/// Remove leftovers of interrupted writes. Everything in `.vault/tmp/` is
+/// ours and is only ever renamed into place when complete.
+fn clean_tmp(tmp: &Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            if let Err(err) = std::fs::remove_file(entry.path()) {
+                tracing::warn!("removing {}: {err}", entry.path().display());
+            } else {
+                tracing::info!("removed leftover {}", entry.path().display());
+            }
+        }
     }
 }
 

@@ -543,3 +543,60 @@ real modules are written from the API notes above, not by moving spike code.
   `join` with the same invite refused with the audience check in the error,
   the invited device syncing a file within 400 ms, its bound token refusing
   to delegate, and both processes exiting within 100 ms of Ctrl-C.
+
+## Stage 5: hardening and end to end
+
+- **Docs downloads an entry's content only from the peer that sent the
+  entry.** In the three-node partition test, C received B's entry through a
+  sync whose connection then flapped, docs gave up on the download, no
+  `ContentReady` came, and C waited forever. `load_merged` now fetches a
+  missing snapshot itself through the blobs downloader with every known peer
+  as provider (5 s timeout), registers the key for retry on the next peer
+  event, and `InsertRemote` triggers an apply even while the content status
+  is not yet complete.
+- **The outgoing pre-authentication cache broke reconnection after a
+  restart.** The `auth-hook` example remembers remotes it authenticated to
+  and skips the handshake; with a 9-minute memory, a peer that restarted
+  (empty admitted set) closed every cached connection with 403 until the
+  memory expired, and blob downloads from it failed with "Unable to
+  download". The cache now lasts 3 s (enough to coalesce the connections the
+  protocols open together), and the hook watches every outgoing connection
+  through a `WeakConnectionHandle`: a close with code 403 tells the task to
+  forget that remote, so the next connection authenticates again. The
+  receiving side keeps the 10-minute admission from the spec.
+- Resource limits: `Limits { max_file_bytes (1 GiB), max_entries (100,000) }`,
+  overridable per vault in `config.json` (`max_file_bytes`, `max_entries`).
+  An oversized file is never published (logged once per attempt); a new path
+  beyond the cap is not published, existing paths still update, and remote
+  content still materializes. The path count is refreshed by each scan.
+- Crash safety: files reach the folder only through `.vault/tmp/` and a
+  rename, so a kill leaves either the old file or the new one, never a
+  partial one. `Engine::new` removes leftovers from `.vault/tmp/`, and an
+  unreadable `state.json` is set aside as `state.json.corrupt` (every file
+  then looks new and is re-published only if it differs from the vault). A
+  crash between a publish and the state update is repaired by the next scan:
+  the file hashes differently from the state, is re-ingested, and
+  `apply_local` finds nothing new.
+- Gate tests in `tests/e2e.rs` (6 tests): criteria 1 and 2 with three nodes
+  (10 MiB to B and C, one-byte edit costs each 1 to 3 chunk-sized blobs),
+  criterion 4 for text and binary on three nodes (same winner on all three,
+  loser copy at its author, on-demand export at the bystander, flag cleared
+  everywhere by C's write), criterion 5 (C offline while A deletes, B edits
+  and adds, A replaces a blob; C converges on restart), criterion 3 with a
+  fourth hookless node closed with 403 by all three members on every ALPN and
+  an expired invite refused by `join`, a real `vaultsync join` process killed
+  with SIGKILL while materializing a 10 MiB file (restart converges, no
+  partial file, no temp leftovers, no spurious version), and the limits.
+  Measured under the full parallel suite in a debug build: 10 MiB to both
+  peers in about 7 s, the one-byte edit in about 6 s, C's catch-up in under
+  a second; the partitioned test alone finishes in 2.3 s.
+
+## Open questions from SPEC.md section 10
+
+1. Automerge text merging applies to every file that is valid UTF-8, has no
+   NUL and is at most 1 MiB; no extension allow-list was added.
+2. Conflict copies are automatic for the loser's author and on demand for
+   other peers (`conflict export`, or `Engine::export_conflicts`), as
+   specified.
+3. Read versus write stays with docs tickets; Biscuit decides admission,
+   audience, expiry and delegation only.
