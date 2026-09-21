@@ -237,10 +237,14 @@ impl Vault {
         self.doc.subscribe().await
     }
 
-    pub async fn shutdown(self) -> Result<()> {
-        let Vault { node, doc, .. } = self;
-        drop(doc);
-        node.shutdown().await
+    /// Look up this device's own entry for `key`.
+    pub async fn own_entry(&self, key: &str) -> Result<Option<Entry>> {
+        self.doc.get_exact(self.author, key, false).await
+    }
+
+    /// Stop the node. The vault is unusable afterwards.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.node.shutdown().await
     }
 }
 

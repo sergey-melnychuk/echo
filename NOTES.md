@@ -341,3 +341,84 @@ real modules are written from the API notes above, not by moving spike code.
 - Smoke test of the binary over loopback (`init`, `whoami`, `run --bind`,
   `invite` while `run` is active, `join`, `status`, Ctrl-C on both): both
   nodes see each other as neighbors and exit within a second of SIGINT.
+
+## Stage 2: text files
+
+- **Contract change (SPEC.md section 5.3, publishing step 2).** A local edit is
+  not applied on top of the merge of every known version. `state.json` keeps,
+  per path, the hash of the bytes on disk and the document heads those bytes
+  came from. Publishing forks the merged document at those heads, applies the
+  whole-file edit there (`update_text` diff) and merges the fork back. Applied
+  on the merge directly, a save made against an older version reverted remote
+  changes that had already reached the docs store but were not yet on disk:
+  in the CRD-1 test, B's edit of line 3 turned A's fresh line 1 back to the
+  old text. With the fork the result is the three-way merge. If the base heads
+  are unknown to the document (should not happen) the engine falls back to
+  applying on the merge and logs it.
+- After publishing, the engine materializes the merged visible content, so a
+  file whose local edit was combined with remote changes is rewritten with
+  the merge at once; the apply flow does the same after publishing the local
+  edit first (CRD-1 step 3).
+- Every file document starts from a deterministic genesis change (fixed
+  actor, time 0, one `put_object` creating the `text` object). Two devices
+  that create the same path independently therefore share one text object
+  and both initial texts survive the merge; without it Automerge would keep
+  two concurrent text objects and show only one.
+- `apply_local` semantics: with a single `version` value and identical
+  visible content it is a no-op (echo suppression, also across restarts);
+  with several concurrent values it always writes, which collapses the
+  register (CRD-5). Concurrent text edits leave two `version` values that
+  are not a conflict; the next echo or edit collapses them.
+- Non-text files (over 1 MiB, containing NUL, or invalid UTF-8) are skipped
+  with a log line until stage 3; a blob version arriving from a peer is
+  skipped the same way.
+- Watcher behavior on macOS (FSEvents through notify 8 and
+  notify-debouncer-full 0.7, measured with `examples/spike_watcher.rs`):
+  paths are reported canonical (`/private/var/...` for a `/var/...` root), so
+  the engine canonicalizes the vault root once; `remove_dir_all` is reported
+  as one event for the directory itself, without its contents; a rename
+  reports only the destination path, for files and for directories alike.
+  The watcher therefore forwards the paths of each debounce window as one
+  batch, and the engine, after handling the batch (a directory: publish every
+  file inside; a missing path: publish a deletion), reconciles: every key in
+  `state.json` whose file is gone is published as deleted. That covers
+  renames, moved directories and removed trees in one rule. Files inside
+  `.vault/` never map to a key (`paths::key_from_path`).
+- **Check and write share one read of the disk.** An apply first compared the
+  file with `state.json` (CRD-1 step 3) and later re-read the file to write
+  it. The directory-removal test hit the gap: the test removed the file
+  between the two reads, the apply saw a missing file on its second read and
+  recreated it from the remote document, and the deletion was never
+  published. `materialize` now takes the hash the caller expects on disk,
+  reads once, and returns `Outcome::LocalChange` instead of writing when the
+  disk holds something else; the apply flow then publishes the local change
+  and retries (at most three rounds). The remaining window is between that
+  single read and the rename of the temporary file, microseconds, and is
+  documented rather than closed: there is no portable compare-and-swap for
+  files.
+- `Engine::scan` runs after the watcher is attached: publish files whose
+  hash differs from `state.json`, publish deletions for state entries with no
+  file, then apply every key in the vault. Debug builds handle the three-node
+  test files in well under a second.
+- Read-only devices never publish (SEC-6); a local edit on such a device is
+  overwritten by the next apply with a warning.
+- Property test (`filedoc::tests::replicas_converge`, 200 cases): three
+  replicas, random text, blob and delete writes and random pairwise syncs,
+  then a full exchange; heads and visible state agree everywhere.
+- Gate tests in `tests/textsync.rs` (5 tests, about 2 s): both-way sync with
+  a pre-existing file, edits, delete, recreate and directory removal;
+  offline catch-up with a partitioned concurrent edit merging line by line;
+  CRD-1 through both the apply and the publish flow; hostile keys
+  (`../evil.txt`, `/abs.txt`, `.vault/config.json`, `x/../../y.txt`,
+  backslashes, `.` components) ignored with `.vault/config.json` intact; a
+  read ticket holder materializes but never publishes.
+- **Startup race with content downloads.** One run in fourteen of the text
+  sync suite timed out at the 30 s deadline. A joiner's engine subscribes to
+  live events after `start_sync` has begun; an entry whose insert event
+  arrived before the subscription and whose content was still downloading
+  when the startup scan ran was skipped by `load_merged`, and the
+  `ContentReady` that followed found no key waiting for that hash, so the
+  file was never written. `load_merged` now records `hash -> key` in the
+  pending map whenever it skips a snapshot (re-checking availability after
+  registering, to close the gap), and `PendingContentReady` applies every
+  pending key as a safety net.

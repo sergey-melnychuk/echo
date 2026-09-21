@@ -2,19 +2,20 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use iroh::EndpointAddr;
 use iroh_docs::api::protocol::ShareMode;
-use iroh_docs::engine::LiveEvent;
 use iroh_docs::store::Query;
 use iroh_docs::DocTicket;
-use n0_future::StreamExt;
 
 use crate::config::{self, Config, Layout};
+use crate::engine::Engine;
 use crate::node::NetOptions;
 use crate::vault::{restrict_capability, Vault};
+use crate::watcher::DEFAULT_DEBOUNCE;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -160,51 +161,17 @@ async fn run_until_ctrl_c(vault: Vault) -> Result<()> {
         }
     );
     vault.start_sync().await?;
-    let mut events = vault.subscribe().await?;
-    println!("syncing; press Ctrl-C to stop");
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            event = events.next() => match event {
-                Some(Ok(event)) => handle_event(&vault, event).await,
-                Some(Err(err)) => tracing::warn!("event stream error: {err:#}"),
-                None => {
-                    tracing::warn!("event stream ended");
-                    tokio::signal::ctrl_c().await?;
-                    break;
-                }
-            },
-        }
-    }
+    let vault = Arc::new(vault);
+    let engine = Arc::new(Engine::new(vault.clone())?);
+    let running = engine.start(DEFAULT_DEBOUNCE).await?;
+    println!(
+        "syncing {}; press Ctrl-C to stop",
+        vault.layout().root().display()
+    );
+    tokio::signal::ctrl_c().await?;
     println!("shutting down");
+    running.stop().await?;
     vault.shutdown().await
-}
-
-async fn handle_event(vault: &Vault, event: LiveEvent) {
-    match event {
-        LiveEvent::NeighborUp(id) => {
-            tracing::info!("peer up {}", id.fmt_short());
-            if let Err(err) = vault.remember_peer(id).await {
-                tracing::warn!("remembering peer {}: {err:#}", id.fmt_short());
-            }
-        }
-        LiveEvent::NeighborDown(id) => tracing::info!("peer down {}", id.fmt_short()),
-        LiveEvent::InsertRemote { from, entry, .. } => tracing::info!(
-            "entry {} from {} ({} bytes)",
-            String::from_utf8_lossy(entry.key()),
-            from.fmt_short(),
-            entry.content_len()
-        ),
-        LiveEvent::ContentReady { hash } => {
-            tracing::debug!("content ready {}", hash.fmt_short())
-        }
-        LiveEvent::SyncFinished(event) => tracing::debug!(
-            "sync with {} finished: {:?}",
-            event.peer.fmt_short(),
-            event.result
-        ),
-        LiveEvent::InsertLocal { .. } | LiveEvent::PendingContentReady => {}
-    }
 }
 
 async fn status(dir: &Path) -> Result<()> {

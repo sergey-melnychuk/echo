@@ -58,8 +58,8 @@ pub struct Node {
     blobs: FsStore,
     docs: Docs,
     router: Router,
-    /// Held for the node's lifetime; see [`Node::lock`].
-    _lock: std::fs::File,
+    /// Held until [`Node::shutdown`]; see [`Node::lock`].
+    lock_file: std::fs::File,
 }
 
 impl Node {
@@ -100,7 +100,7 @@ impl Node {
             blobs,
             docs,
             router,
-            _lock: lock,
+            lock_file: lock,
         })
     }
 
@@ -159,13 +159,18 @@ impl Node {
         ))
     }
 
-    /// Stop the protocols (which shuts the stores down) and close the endpoint.
-    pub async fn shutdown(self) -> Result<()> {
+    /// Stop the protocols (which shuts the stores down), close the endpoint
+    /// and release the vault lock, so the directory can be opened again even
+    /// while this value is still alive.
+    pub async fn shutdown(&self) -> Result<()> {
         self.router
             .shutdown()
             .await
             .context("shutting the router down")?;
         self.endpoint.close().await;
+        if let Err(err) = self.lock_file.unlock() {
+            tracing::warn!("releasing the vault lock: {err}");
+        }
         Ok(())
     }
 }

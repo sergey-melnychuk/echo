@@ -6,5 +6,9 @@
 
 pub mod cli;
 pub mod config;
+pub mod engine;
+pub mod filedoc;
 pub mod node;
+pub mod paths;
 pub mod vault;
+pub mod watcher;
