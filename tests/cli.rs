@@ -5,12 +5,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use echo::cli::{execute, make_invite, Cli, Command, ConflictAction};
+use echo::config::{self, Layout};
+use echo::node::NetOptions;
+use echo::vault::Vault;
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::Capability;
-use vaultsync::cli::{execute, make_invite, Cli, Command, ConflictAction};
-use vaultsync::config::{self, Layout};
-use vaultsync::node::NetOptions;
-use vaultsync::vault::Vault;
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -59,7 +59,7 @@ async fn init_whoami_invite_status() -> Result<()> {
     assert_eq!(read_ticket.nodes[0].addrs.len(), 1);
     assert!(!read.delegatable);
     // The invite string round-trips.
-    let parsed: vaultsync::invite::Invite = invite.to_string().parse()?;
+    let parsed: echo::invite::Invite = invite.to_string().parse()?;
     assert_eq!(parsed, invite);
 
     // After a node ran, the invite carries the recorded address.

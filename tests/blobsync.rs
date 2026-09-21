@@ -12,11 +12,11 @@ use common::{
     hash_hex, merged_visible, random_bytes, wait_for_bytes, wait_for_file, wait_for_merged,
     wait_until, write_file, Peer,
 };
+use echo::chunker::MIN_CHUNK;
+use echo::config::{self, Layout};
+use echo::filedoc::{Content, VersionKind};
 use iroh_blobs::api::blobs::BlobStatus;
 use iroh_blobs::Hash;
-use vaultsync::chunker::MIN_CHUNK;
-use vaultsync::config::{self, Layout};
-use vaultsync::filedoc::{Content, VersionKind};
 
 /// Every complete blob on a peer with its size.
 async fn blob_inventory(peer: &Peer) -> Result<HashMap<Hash, u64>> {

@@ -460,7 +460,7 @@ real modules are written from the API notes above, not by moving spike code.
   hash, 8 hex digits of the actor); the engine updates it on every
   materialize, and `status` and `conflict list` read it without opening the
   stores. The loser's author gets `.vault/conflicts/<key>.<8 hex>` written
-  automatically (CRD-4); other peers run `vaultsync conflict export <dir>
+  automatically (CRD-4); other peers run `echosync conflict export <dir>
   <path>`, which needs the stores and therefore a stopped node, or the
   library's `Engine::export_conflicts`, which fetches the loser's chunks from
   peers. A losing text version is exported as the merged text, because the
@@ -505,7 +505,7 @@ real modules are written from the API notes above, not by moving spike code.
   invite. The client side of `join` verifies that the invite would admit
   this device before storing anything, so a wrong-audience or expired invite
   fails with an explanation rather than with silent peers.
-- Invite format: `vaultsync1.` plus base64url of JSON `{ticket, token, root,
+- Invite format: `echosync1.` plus base64url of JSON `{ticket, token, root,
   delegatable}`. About 1 KB for a bound write invite with one address. The
   `invite` command works for the owner (mints from `root.key`) and for a
   member whose token is delegatable (narrows its own token); without
@@ -584,7 +584,7 @@ real modules are written from the API notes above, not by moving spike code.
   everywhere by C's write), criterion 5 (C offline while A deletes, B edits
   and adds, A replaces a blob; C converges on restart), criterion 3 with a
   fourth hookless node closed with 403 by all three members on every ALPN and
-  an expired invite refused by `join`, a real `vaultsync join` process killed
+  an expired invite refused by `join`, a real `echosync join` process killed
   with SIGKILL while materializing a 10 MiB file (restart converges, no
   partial file, no temp leftovers, no spurious version), and the limits.
   Measured under the full parallel suite in a debug build: 10 MiB to both
@@ -642,3 +642,11 @@ Two processes on one macOS machine with the default `N0` preset (no
 - Not exercised: two different machines behind NATs, and a relay-free
   private preset (`RelayMode::Disabled` plus `--addr`), which the loopback
   tests cover only in spirit.
+
+## Naming
+
+The package is `echo` and the executable `echosync` (a binary named `echo`
+installed into `~/.cargo/bin` would shadow the shell's `echo`). SPEC.md
+keeps the working name `vaultsync` from the design phase. The auth ALPN is
+`echosync/auth/0` and invites start with `echosync1.`; the state directory
+stays `.vault/`.

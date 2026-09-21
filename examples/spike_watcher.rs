@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
+use echo::watcher::Watcher;
 use tokio::sync::mpsc;
-use vaultsync::watcher::Watcher;
 
 async fn drain(rx: &mut mpsc::UnboundedReceiver<Vec<std::path::PathBuf>>, label: &str) {
     tokio::time::sleep(Duration::from_millis(400)).await;

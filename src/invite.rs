@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth;
 
 /// The invite string prefix, versioned.
-pub const PREFIX: &str = "vaultsync1.";
+pub const PREFIX: &str = "echosync1.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Invite {
@@ -49,7 +49,7 @@ impl Invite {
         let body = text
             .trim()
             .strip_prefix(PREFIX)
-            .ok_or_else(|| anyhow!("not a vaultsync invite (expected the {PREFIX} prefix)"))?;
+            .ok_or_else(|| anyhow!("not an echosync invite (expected the {PREFIX} prefix)"))?;
         let json = data_encoding::BASE64URL_NOPAD
             .decode(body.as_bytes())
             .context("invite is not valid base64url")?;
@@ -142,7 +142,7 @@ mod tests {
             ticket.capability.id()
         );
         assert!(Invite::decode("docaaa...").is_err());
-        assert!(Invite::decode("vaultsync1.!!!").is_err());
+        assert!(Invite::decode("echosync1.!!!").is_err());
         // A plain docs ticket is not an invite.
         assert!(Invite::decode(&ticket.to_string()).is_err());
     }

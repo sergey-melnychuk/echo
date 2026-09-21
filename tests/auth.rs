@@ -10,16 +10,16 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{bail, Result};
 use biscuit_auth::macros::block;
 use common::{init_tracing, wait_for_file, Peer, DEADLINE};
+use echo::auth::{self, AuthConfig};
+use echo::config::{self, Layout};
+use echo::node::{NetOptions, Node};
+use echo::vault::Vault;
 use iroh::endpoint::ConnectionError;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::engine::LiveEvent;
 use iroh_docs::store::Query;
 use n0_future::StreamExt;
-use vaultsync::auth::{self, AuthConfig};
-use vaultsync::config::{self, Layout};
-use vaultsync::node::{NetOptions, Node};
-use vaultsync::vault::Vault;
 
 const HOUR: Duration = Duration::from_secs(3600);
 

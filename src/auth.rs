@@ -32,7 +32,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
-pub const ALPN: &[u8] = b"vaultsync/auth/0";
+pub const ALPN: &[u8] = b"echosync/auth/0";
 /// SEC-3: the largest token accepted.
 pub const MAX_TOKEN_BYTES: usize = 4096;
 /// SEC-3: how long one handshake may take.

@@ -1,7 +1,7 @@
-# vaultsync
+# echo
 
 A proof of concept that keeps a folder in sync between devices with no
-central server, built on [iroh](https://iroh.computer) 1.x, iroh-docs,
+central server (the executable is `echosync`), built on [iroh](https://iroh.computer) 1.x, iroh-docs,
 iroh-blobs and Automerge.
 
 - Text files merge character by character; concurrent edits are combined.
@@ -33,8 +33,8 @@ The rest of `<dir>` is the synced folder. Do not put your own files under
 ### The owner creates a vault
 
 ```sh
-vaultsync init ~/shared
-vaultsync run ~/shared
+echosync init ~/shared
+echosync run ~/shared
 ```
 
 `run` prints the vault id, this device's id and its addresses, syncs the
@@ -46,14 +46,14 @@ published on the first run.
 On the new device:
 
 ```sh
-vaultsync whoami ~/shared-copy
+echosync whoami ~/shared-copy
 ```
 
 Send the printed endpoint id to the owner. On the owner's machine (while
 `run` is active or not):
 
 ```sh
-vaultsync invite ~/shared --write --audience <endpoint id> --ttl 7d
+echosync invite ~/shared --write --audience <endpoint id> --ttl 7d
 ```
 
 This prints one long string: the invite. It carries a docs ticket, a token
@@ -66,7 +66,7 @@ it expires, and its holder can `invite` others by narrowing it.
 ### The new device joins
 
 ```sh
-vaultsync join ~/shared-copy '<invite>'
+echosync join ~/shared-copy '<invite>'
 ```
 
 `join` stores the invite, verifies that it admits this device, and then
@@ -90,9 +90,9 @@ Drop a file into `/tmp/v1` and it appears in `/tmp/v2` within a second.
 ### Status and conflicts
 
 ```sh
-vaultsync status ~/shared
-vaultsync conflict list ~/shared
-vaultsync conflict export ~/shared path/to/file.bin   # node stopped
+echosync status ~/shared
+echosync conflict list ~/shared
+echosync conflict export ~/shared path/to/file.bin   # node stopped
 ```
 
 When two devices change the same non-text file while apart, every device

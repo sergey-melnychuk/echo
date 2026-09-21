@@ -20,7 +20,7 @@ use crate::watcher::DEFAULT_DEBOUNCE;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "vaultsync",
+    name = "echosync",
     version,
     about = "Folder sync on iroh, iroh-docs and Automerge"
 )]

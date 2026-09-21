@@ -521,7 +521,7 @@ mod auth {
     use iroh::protocol::{AcceptError, ProtocolHandler};
     use tokio::sync::{mpsc, oneshot};
 
-    pub const ALPN: &[u8] = b"vaultsync/auth/0";
+    pub const ALPN: &[u8] = b"echosync/auth/0";
     const ACCEPTED: u32 = 1;
     const DENIED: u32 = 403;
     const MAX_TOKEN: usize = 4096;

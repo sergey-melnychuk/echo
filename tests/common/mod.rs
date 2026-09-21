@@ -8,13 +8,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use echo::engine::{Engine, Running};
+use echo::filedoc::{actor_for, Content, FileDoc, Visible};
+use echo::invite::Invite;
+use echo::node::NetOptions;
+use echo::vault::Vault;
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
-use vaultsync::engine::{Engine, Running};
-use vaultsync::filedoc::{actor_for, Content, FileDoc, Visible};
-use vaultsync::invite::Invite;
-use vaultsync::node::NetOptions;
-use vaultsync::vault::Vault;
 
 pub const DEADLINE: Duration = Duration::from_secs(60);
 pub const DEBOUNCE: Duration = Duration::from_millis(100);

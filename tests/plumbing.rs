@@ -5,11 +5,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use echo::invite::Invite;
+use echo::node::NetOptions;
+use echo::vault::Vault;
 use iroh_docs::api::protocol::ShareMode;
 use iroh_docs::store::Query;
-use vaultsync::invite::Invite;
-use vaultsync::node::NetOptions;
-use vaultsync::vault::Vault;
 
 const DEADLINE: Duration = Duration::from_secs(30);
 const HOUR: Duration = Duration::from_secs(3600);

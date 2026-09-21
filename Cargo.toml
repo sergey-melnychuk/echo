@@ -1,5 +1,5 @@
 [package]
-name = "vaultsync"
+name = "echo"
 version = "0.1.0"
 edition = "2021"
 # Maximum rust-version among the dependencies (iroh, iroh-blobs, iroh-docs).
@@ -11,6 +11,12 @@ keywords = ["p2p", "sync", "iroh", "automerge", "crdt"]
 categories = ["filesystem", "network-programming"]
 # A proof of concept, not a crates.io release.
 publish = false
+
+# The library crate is `echo`; the executable is `echosync`, so that installing
+# it never shadows the shell's `echo`.
+[[bin]]
+name = "echosync"
+path = "src/main.rs"
 
 [dependencies]
 iroh = "1.2"

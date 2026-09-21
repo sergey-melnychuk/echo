@@ -14,16 +14,16 @@ use common::{
     merged_visible, random_bytes, wait_for_bytes, wait_for_file, wait_until, write_file, Peer,
     DEADLINE, DEBOUNCE,
 };
+use echo::chunker::MIN_CHUNK;
+use echo::config::{self, Config, Layout};
+use echo::engine::{Engine, Limits, Outcome};
+use echo::filedoc::{Content, VersionKind};
+use echo::node::{NetOptions, Node};
+use echo::vault::Vault;
 use iroh::endpoint::ConnectionError;
 use iroh_blobs::api::blobs::BlobStatus;
 use iroh_blobs::Hash;
 use iroh_docs::api::protocol::ShareMode;
-use vaultsync::chunker::MIN_CHUNK;
-use vaultsync::config::{self, Config, Layout};
-use vaultsync::engine::{Engine, Limits, Outcome};
-use vaultsync::filedoc::{Content, VersionKind};
-use vaultsync::node::{NetOptions, Node};
-use vaultsync::vault::Vault;
 
 async fn chunk_blobs(peer: &Peer) -> Result<HashMap<Hash, u64>> {
     let store = peer.vault.node().blobs();
@@ -266,12 +266,12 @@ async fn fourth_node_without_a_valid_token_is_refused_by_everyone() -> Result<()
 }
 
 fn spawn_binary(args: &[&str]) -> Result<Child> {
-    Command::new(env!("CARGO_BIN_EXE_vaultsync"))
+    Command::new(env!("CARGO_BIN_EXE_echosync"))
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("spawning vaultsync")
+        .context("spawning echosync")
 }
 
 /// A kill during materialization leaves a consistent folder after restart:

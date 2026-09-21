@@ -936,6 +936,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "biscuit-auth",
+ "blake3",
+ "clap",
+ "data-encoding",
+ "fastcdc",
+ "iroh",
+ "iroh-blobs",
+ "iroh-docs",
+ "iroh-gossip",
+ "n0-future",
+ "notify",
+ "notify-debouncer-full",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4696,34 +4724,6 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
-name = "vaultsync"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "automerge",
- "biscuit-auth",
- "blake3",
- "clap",
- "data-encoding",
- "fastcdc",
- "iroh",
- "iroh-blobs",
- "iroh-docs",
- "iroh-gossip",
- "n0-future",
- "notify",
- "notify-debouncer-full",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "walkdir",
-]
 
 [[package]]
 name = "version_check"

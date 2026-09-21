@@ -12,10 +12,10 @@ use anyhow::{bail, Result};
 use common::{
     merged_content, wait_for_bytes, wait_for_file, wait_for_merged, write_file, Peer, DEADLINE,
 };
+use echo::config::{Config, Layout};
+use echo::engine::Outcome;
+use echo::filedoc::{actor_for, Content, FileDoc};
 use iroh_docs::store::Query;
-use vaultsync::config::{Config, Layout};
-use vaultsync::engine::Outcome;
-use vaultsync::filedoc::{actor_for, Content, FileDoc};
 
 #[tokio::test]
 async fn text_files_sync_both_ways_including_delete() -> Result<()> {
