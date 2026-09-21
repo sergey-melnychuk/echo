@@ -620,3 +620,26 @@ and the vault and config plumbing (keys, tokens, peers, invites, lock) carry
 most of the difference. Tests: 1,840 lines in `tests/` plus unit tests in
 the modules; 50 tests, the whole suite in about 44 s in a debug build. The
 stage 0 spike programs under `examples/` are another 1,440 lines.
+
+## Real-network trial (default preset, 2026-09-21)
+
+Two processes on one macOS machine with the default `N0` preset (no
+`--loopback`): n0's public relays plus pkarr and DNS address lookup.
+
+- Both endpoints chose `https://euc1-1.relay.n0.iroh.link./` as their home
+  relay within a few seconds of binding; `run` printed only the LAN address
+  (`10.10.230.119:<port>`) because `endpoint.addr()` is recorded before the
+  home relay is known.
+- The invite was issued before `run`, so it carried the owner's endpoint id
+  and no address. The joining process resolved the owner through discovery
+  and had the first file within 1 s of starting; the reply went back in 2 s.
+  Admission ran over the relay path in both directions (`admitted` on both
+  sides), and the joiner recorded the owner with its relay URL only in
+  `peers.json`, so later starts dial through the relay and let iroh upgrade
+  to a direct path.
+- iroh-docs logged one benign `sync state finish called but not in running
+  state` warning on the owner when both sides started syncing at once, the
+  same simultaneous-connect quirk seen on loopback.
+- Not exercised: two different machines behind NATs, and a relay-free
+  private preset (`RelayMode::Disabled` plus `--addr`), which the loopback
+  tests cover only in spirit.
