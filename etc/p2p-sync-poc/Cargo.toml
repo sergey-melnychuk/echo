@@ -1,0 +1,20 @@
+[package]
+name = "probe"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+iroh = "1.2"
+iroh-base = "1.2"
+iroh-docs = "0.101"
+iroh-gossip = "0.101"
+iroh-blobs = { version = "0.103", features = ["fs-store"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-lite = "2"
+chrono = "0.4"
